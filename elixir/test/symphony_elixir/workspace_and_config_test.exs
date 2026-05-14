@@ -317,6 +317,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "state" => %{"name" => "Todo"},
       "branchName" => "mt-1",
       "url" => "https://example.org/issues/MT-1",
+      "creator" => %{
+        "id" => "user-1"
+      },
       "assignee" => %{
         "id" => "user-1"
       },
@@ -351,6 +354,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
+    assert issue.creator_id == "user-1"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
   end
@@ -367,6 +371,61 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     issue = Client.normalize_issue_for_test(raw_issue, "user-1")
+
+    refute issue.assigned_to_worker
+  end
+
+  test "linear client routes issues by creator owner and allows unassigned owned issues" do
+    raw_issue = %{
+      "id" => "issue-owned",
+      "identifier" => "MT-100",
+      "title" => "Owned todo",
+      "state" => %{"name" => "Todo"},
+      "creator" => %{
+        "id" => "user-1"
+      },
+      "assignee" => nil
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue, nil, "user-1")
+
+    assert issue.creator_id == "user-1"
+    assert issue.assignee_id == nil
+    assert issue.assigned_to_worker
+  end
+
+  test "linear client skips issues created by another owner" do
+    raw_issue = %{
+      "id" => "issue-other-owner",
+      "identifier" => "MT-101",
+      "title" => "Other owner's todo",
+      "state" => %{"name" => "Todo"},
+      "creator" => %{
+        "id" => "user-2"
+      },
+      "assignee" => nil
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue, nil, "user-1")
+
+    refute issue.assigned_to_worker
+  end
+
+  test "linear client skips owned issues assigned to another user" do
+    raw_issue = %{
+      "id" => "issue-assigned-away",
+      "identifier" => "MT-102",
+      "title" => "Owned but assigned away",
+      "state" => %{"name" => "Todo"},
+      "creator" => %{
+        "id" => "user-1"
+      },
+      "assignee" => %{
+        "id" => "user-2"
+      }
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue, nil, "user-1")
 
     refute issue.assigned_to_worker
   end
