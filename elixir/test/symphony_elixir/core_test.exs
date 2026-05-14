@@ -15,6 +15,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.polling.interval_ms == 30_000
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+    assert config.tracker.owner == nil
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
 
@@ -147,6 +148,22 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.settings!().tracker.assignee == env_assignee
+  end
+
+  test "linear owner resolves from LINEAR_OWNER env var" do
+    previous_linear_owner = System.get_env("LINEAR_OWNER")
+    env_owner = "me"
+
+    on_exit(fn -> restore_env("LINEAR_OWNER", previous_linear_owner) end)
+    System.put_env("LINEAR_OWNER", env_owner)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_owner: nil,
+      tracker_project_slug: "project",
+      codex_command: "/bin/sh app-server"
+    )
+
+    assert Config.settings!().tracker.owner == env_owner
   end
 
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
