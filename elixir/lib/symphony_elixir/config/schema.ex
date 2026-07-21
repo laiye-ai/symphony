@@ -132,6 +132,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
+      # Minimum interval between continuation turn starts per issue; 0 disables
+      # pacing. Raise this to throttle tracker traffic from the workpad loop.
+      field(:continuation_min_turn_interval_ms, :integer, default: 0)
       field(:max_concurrent_agents_by_state, :map, default: %{})
     end
 
@@ -140,12 +143,19 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :continuation_min_turn_interval_ms,
+          :max_concurrent_agents_by_state
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> validate_number(:continuation_min_turn_interval_ms, greater_than_or_equal_to: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end

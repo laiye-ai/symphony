@@ -185,6 +185,15 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
+  defp tool_error_payload({:linear_rate_limited, retry_after_ms}) do
+    %{
+      "error" => %{
+        "message" => "Linear API is rate limited. Retry after #{retry_after_ms}ms.",
+        "retryAfterMs" => retry_after_ms
+      }
+    }
+  end
+
   defp tool_error_payload({:linear_api_request, reason}) do
     %{
       "error" => %{

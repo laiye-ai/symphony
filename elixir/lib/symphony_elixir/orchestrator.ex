@@ -12,6 +12,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  # Upper bound for honoring a rate-limit retry-after hint; the Linear limit
+  # window is 1 hour, but probing every <=10 minutes costs at most one request.
+  @rate_limited_retry_delay_cap_ms 600_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -261,6 +264,10 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, {:workflow_parse_error, reason}} ->
         Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+        state
+
+      {:error, {:linear_rate_limited, remaining_ms}} ->
+        Logger.warning("Linear API rate limited; pausing candidate polling for ~#{div(remaining_ms, 1000)}s")
         state
 
       {:error, reason} ->
@@ -671,6 +678,16 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
 
+      {:error, reason} when is_integer(attempt) ->
+        Logger.warning("Issue refresh failed before dispatch for #{issue_context(issue)}: #{inspect(reason)}; scheduling retry")
+
+        schedule_issue_retry(state, issue.id, attempt + 1, %{
+          identifier: issue.identifier,
+          error: "issue refresh failed: #{inspect(reason)}",
+          worker_host: preferred_worker_host,
+          retry_after_ms: retry_after_ms_from_reason(reason)
+        })
+
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
         state
@@ -841,7 +858,10 @@ defmodule SymphonyElixir.Orchestrator do
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{
+             error: "retry poll failed: #{inspect(reason)}",
+             retry_after_ms: retry_after_ms_from_reason(reason)
+           })
          )}
     end
   end
@@ -926,12 +946,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    retry_after_ms = metadata[:retry_after_ms]
+
+    cond do
+      metadata[:delay_type] == :continuation and attempt == 1 ->
+        @continuation_retry_delay_ms
+
+      is_integer(retry_after_ms) and retry_after_ms > 0 ->
+        min(retry_after_ms, @rate_limited_retry_delay_cap_ms)
+
+      true ->
+        failure_retry_delay(attempt)
     end
   end
+
+  defp retry_after_ms_from_reason({:linear_rate_limited, remaining_ms})
+       when is_integer(remaining_ms) and remaining_ms > 0,
+       do: remaining_ms
+
+  defp retry_after_ms_from_reason(_reason), do: nil
 
   defp failure_retry_delay(attempt) do
     max_delay_power = min(attempt - 1, 10)

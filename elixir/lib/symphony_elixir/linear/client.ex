@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.{Config, Linear.Issue, Linear.RateLimit}
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -169,6 +169,16 @@ defmodule SymphonyElixir.Linear.Client do
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
+    case RateLimit.check() do
+      {:rate_limited, remaining_ms} ->
+        {:error, {:linear_rate_limited, remaining_ms}}
+
+      :ok ->
+        do_graphql(query, variables, opts)
+    end
+  end
+
+  defp do_graphql(query, variables, opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
 
@@ -177,16 +187,71 @@ defmodule SymphonyElixir.Linear.Client do
       {:ok, body}
     else
       {:ok, response} ->
+        handle_error_response(payload, response)
+
+      {:error, reason} ->
+        Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+        {:error, {:linear_api_request, reason}}
+    end
+  end
+
+  defp handle_error_response(payload, response) do
+    case rate_limit_pause_ms(response) do
+      pause_ms when is_integer(pause_ms) ->
+        paused_ms = RateLimit.pause(pause_ms)
+
+        Logger.warning(
+          "Linear API rate limited status=#{response.status}; pausing all Linear requests for #{paused_ms}ms" <>
+            linear_error_context(payload, response)
+        )
+
+        {:error, {:linear_rate_limited, paused_ms}}
+
+      nil ->
         Logger.error(
           "Linear GraphQL request failed status=#{response.status}" <>
             linear_error_context(payload, response)
         )
 
         {:error, {:linear_api_status, response.status}}
+    end
+  end
 
-      {:error, reason} ->
-        Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
-        {:error, {:linear_api_request, reason}}
+  # Linear reports rate limiting as HTTP 400 with extensions.code=RATELIMITED and
+  # a rateLimitResult carrying the limit window duration; plain 429 is handled too.
+  defp rate_limit_pause_ms(%{status: status} = response) do
+    case find_rate_limited_error(Map.get(response, :body)) do
+      %{} = rate_limited_error ->
+        rate_limit_duration_ms(rate_limited_error)
+
+      nil when status == 429 ->
+        RateLimit.default_pause_ms()
+
+      nil ->
+        nil
+    end
+  end
+
+  defp find_rate_limited_error(%{"errors" => errors}) when is_list(errors) do
+    Enum.find(errors, fn
+      %{"extensions" => %{"code" => code}} when is_binary(code) ->
+        String.upcase(code) == "RATELIMITED"
+
+      _ ->
+        false
+    end)
+  end
+
+  defp find_rate_limited_error(body) when is_binary(body) do
+    if body =~ "RATELIMITED", do: %{}, else: nil
+  end
+
+  defp find_rate_limited_error(_body), do: nil
+
+  defp rate_limit_duration_ms(rate_limited_error) do
+    case get_in(rate_limited_error, ["extensions", "meta", "rateLimitResult", "duration"]) do
+      duration_ms when is_integer(duration_ms) and duration_ms > 0 -> duration_ms
+      _ -> RateLimit.default_pause_ms()
     end
   end
 

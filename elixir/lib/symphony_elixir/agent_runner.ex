@@ -90,6 +90,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+    turn_started_at_ms = System.monotonic_time(:millisecond)
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
@@ -104,6 +105,8 @@ defmodule SymphonyElixir.AgentRunner do
       case continue_with_issue?(issue, issue_state_fetcher) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+          throttle_continuation_turn(refreshed_issue, opts, turn_started_at_ms)
 
           do_run_codex_turns(
             app_session,
@@ -124,10 +127,40 @@ defmodule SymphonyElixir.AgentRunner do
         {:done, _refreshed_issue} ->
           :ok
 
+        {:rate_limited, reason} ->
+          Logger.warning("Linear rate limited while refreshing #{issue_context(issue)} turn=#{turn_number}/#{max_turns}: #{inspect(reason)}; returning control to orchestrator")
+
+          :ok
+
         {:error, reason} ->
           {:error, reason}
       end
     end
+  end
+
+  # Fast workpad loops can burn the tracker's hourly API quota (each turn costs
+  # a state refresh here plus the agent's own tracker traffic), so enforce a
+  # minimum interval between continuation turn starts when configured.
+  defp throttle_continuation_turn(issue, opts, turn_started_at_ms) do
+    min_interval_ms =
+      Keyword.get(
+        opts,
+        :continuation_min_turn_interval_ms,
+        Config.settings!().agent.continuation_min_turn_interval_ms
+      )
+
+    if is_integer(min_interval_ms) and min_interval_ms > 0 do
+      elapsed_ms = System.monotonic_time(:millisecond) - turn_started_at_ms
+      wait_ms = min_interval_ms - elapsed_ms
+
+      if wait_ms > 0 do
+        Logger.info("Throttling continuation turn for #{issue_context(issue)}; waiting #{wait_ms}ms to respect continuation_min_turn_interval_ms=#{min_interval_ms}")
+
+        Process.sleep(wait_ms)
+      end
+    end
+
+    :ok
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
@@ -156,12 +189,30 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, []} ->
         {:done, issue}
 
+      {:error, {:linear_rate_limited, _remaining_ms} = reason} ->
+        {:rate_limited, reason}
+
       {:error, reason} ->
         {:error, {:issue_state_refresh_failed, reason}}
     end
   end
 
   defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+
+  @doc false
+  @spec throttle_continuation_turn_for_test(Issue.t(), keyword(), integer()) :: :ok
+  def throttle_continuation_turn_for_test(%Issue{} = issue, opts, turn_started_at_ms)
+      when is_list(opts) and is_integer(turn_started_at_ms) do
+    throttle_continuation_turn(issue, opts, turn_started_at_ms)
+  end
+
+  @doc false
+  @spec continue_with_issue_for_test?(Issue.t(), ([String.t()] -> term())) ::
+          {:continue, Issue.t()} | {:done, Issue.t()} | {:rate_limited, term()} | {:error, term()}
+  def continue_with_issue_for_test?(%Issue{} = issue, issue_state_fetcher)
+      when is_function(issue_state_fetcher, 1) do
+    continue_with_issue?(issue, issue_state_fetcher)
+  end
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
