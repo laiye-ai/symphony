@@ -317,6 +317,9 @@ Parsing rules:
 - If front matter is absent, treat the entire file as prompt body and use an empty config map.
 - YAML front matter MUST decode to a map/object; non-map YAML is an error.
 - Prompt body is trimmed before use.
+- `WORKFLOW.md` is read as UTF-8. Lines are split on `\n`, `\r\n`, or `\r` only, and splitting MUST
+  NOT treat a byte inside a multi-byte UTF-8 character as a line break. A prompt body that is valid
+  UTF-8 on disk MUST stay valid UTF-8 after parsing.
 
 Returned workflow object:
 
@@ -918,6 +921,9 @@ Protocol source of truth:
   protocol controls protocol shape and transport behavior.
 - Symphony-specific requirements in this section still control orchestration behavior, workspace
   selection, prompt construction, continuation handling, and observability extraction.
+- Serializing an outbound message MUST NOT abort the turn on invalid UTF-8. Implementations MUST
+  repair the offending text, log the field, byte size, and first invalid byte offset, and send the
+  repaired message, so one damaged character cannot burn the turn and every retry behind it.
 
 ### 10.1 Launch Contract
 

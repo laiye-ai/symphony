@@ -1055,9 +1055,85 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp tool_call_arguments(_params), do: %{}
 
   defp send_message(port, message) do
-    line = Jason.encode!(message) <> "\n"
+    line = encode_message!(message) <> "\n"
     Port.command(port, line)
   end
+
+  # Turn prompts are assembled from workflow templates and tracker text, so a
+  # single mangled multi-byte character used to raise `Jason.EncodeError` here
+  # and take down the turn together with every retry. Repair the payload,
+  # record where the damage was, and keep the turn alive.
+  defp encode_message!(message) do
+    Jason.encode!(message)
+  rescue
+    error in Jason.EncodeError ->
+      case repair_invalid_utf8(message) do
+        {:repaired, repaired, repairs} ->
+          Enum.each(repairs, &log_invalid_utf8_repair/1)
+          Jason.encode!(repaired)
+
+        :unchanged ->
+          reraise error, __STACKTRACE__
+      end
+  end
+
+  defp log_invalid_utf8_repair(%{path: path, byte_size: byte_size, invalid_offset: invalid_offset}) do
+    Logger.error("Repaired invalid UTF-8 in Codex app-server message field=#{path} byte_size=#{byte_size} first_invalid_byte_offset=#{invalid_offset}")
+  end
+
+  defp repair_invalid_utf8(message) do
+    case repair_utf8(message, [], []) do
+      {_repaired, []} -> :unchanged
+      {repaired, repairs} -> {:repaired, repaired, Enum.reverse(repairs)}
+    end
+  end
+
+  defp repair_utf8(value, path, repairs) when is_binary(value) do
+    if String.valid?(value) do
+      {value, repairs}
+    else
+      repair = %{
+        path: format_repair_path(path),
+        byte_size: byte_size(value),
+        invalid_offset: first_invalid_utf8_offset(value, 0)
+      }
+
+      {String.replace_invalid(value), [repair | repairs]}
+    end
+  end
+
+  defp repair_utf8(value, path, repairs) when is_map(value) and not is_struct(value) do
+    Enum.reduce(value, {%{}, repairs}, fn {key, entry}, {acc, acc_repairs} ->
+      {repaired_key, acc_repairs} = repair_utf8(key, [key | path], acc_repairs)
+      {repaired_entry, acc_repairs} = repair_utf8(entry, [key | path], acc_repairs)
+
+      {Map.put(acc, repaired_key, repaired_entry), acc_repairs}
+    end)
+  end
+
+  defp repair_utf8(value, path, repairs) when is_list(value) do
+    {repaired, {acc_repairs, _index}} =
+      Enum.map_reduce(value, {repairs, 0}, fn entry, {acc_repairs, index} ->
+        {repaired_entry, acc_repairs} = repair_utf8(entry, [index | path], acc_repairs)
+
+        {repaired_entry, {acc_repairs, index + 1}}
+      end)
+
+    {repaired, acc_repairs}
+  end
+
+  defp repair_utf8(value, _path, repairs), do: {value, repairs}
+
+  defp format_repair_path([]), do: "<root>"
+  defp format_repair_path(path), do: path |> Enum.reverse() |> Enum.map_join(".", &to_string/1)
+
+  defp first_invalid_utf8_offset(<<>>, offset), do: offset
+
+  defp first_invalid_utf8_offset(<<_codepoint::utf8, rest::binary>> = binary, offset) do
+    first_invalid_utf8_offset(rest, offset + byte_size(binary) - byte_size(rest))
+  end
+
+  defp first_invalid_utf8_offset(_binary, offset), do: offset
 
   defp needs_input?(method, payload)
        when is_binary(method) and is_map(payload) do

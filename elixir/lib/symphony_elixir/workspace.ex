@@ -343,15 +343,17 @@ defmodule SymphonyElixir.Workspace do
     {:error, {:workspace_hook_failed, hook_name, status, output}}
   end
 
-  defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
+  # Cut on codepoints, never on bytes: hook output can be UTF-8 text, and
+  # `binary_part/3` would leave half a character behind.
+  defp sanitize_hook_output_for_log(output, max_chars \\ 2_048) do
     binary_output = IO.iodata_to_binary(output)
 
-    case byte_size(binary_output) <= max_bytes do
+    case String.length(binary_output) <= max_chars do
       true ->
         binary_output
 
       false ->
-        binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
+        String.slice(binary_output, 0, max_chars) <> "... (truncated)"
     end
   end
 

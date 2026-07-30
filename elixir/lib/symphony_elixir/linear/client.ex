@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.{Config, Linear.Issue, Linear.RateLimit}
 
   @issue_page_size 50
-  @max_error_body_log_bytes 1_000
+  @max_error_body_log_chars 1_000
 
   @query """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
@@ -457,13 +457,15 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp summarize_error_body(body) do
     body
-    |> inspect(limit: 20, printable_limit: @max_error_body_log_bytes)
+    |> inspect(limit: 20, printable_limit: @max_error_body_log_chars)
     |> truncate_error_body()
   end
 
+  # Cut on codepoints, never on bytes: Linear error bodies carry UTF-8 text, and
+  # `binary_part/3` would leave half a character behind.
   defp truncate_error_body(body) when is_binary(body) do
-    if byte_size(body) > @max_error_body_log_bytes do
-      binary_part(body, 0, @max_error_body_log_bytes) <> "...<truncated>"
+    if String.length(body) > @max_error_body_log_chars do
+      String.slice(body, 0, @max_error_body_log_chars) <> "...<truncated>"
     else
       body
     end

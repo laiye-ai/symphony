@@ -7,6 +7,14 @@ defmodule SymphonyElixir.Workflow do
 
   @workflow_file_name "WORKFLOW.md"
 
+  # Regexes without the `u` modifier run PCRE in byte mode, and there `\R` also
+  # matches the bare byte 0x85 (NEL). 0x85 is a legitimate continuation byte in
+  # many UTF-8 sequences (`清` is E6 B8 85), so `~r/\R/` used to split
+  # multi-byte characters in half and the rejoined prompt became invalid UTF-8.
+  # Match only the newline forms a WORKFLOW.md can actually carry; every byte
+  # here is ASCII, so it can never land inside a multi-byte character.
+  @line_break ~r/\r\n|\r|\n/
+
   @spec workflow_file_path() :: Path.t()
   def workflow_file_path do
     Application.get_env(:symphony_elixir, :workflow_file_path) ||
@@ -83,7 +91,7 @@ defmodule SymphonyElixir.Workflow do
   end
 
   defp split_front_matter(content) do
-    lines = String.split(content, ~r/\R/, trim: false)
+    lines = String.split(content, @line_break, trim: false)
 
     case lines do
       ["---" | tail] ->
