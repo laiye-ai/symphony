@@ -1,15 +1,19 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e
+.PHONY: help all setup deps assets build fmt fmt-check lint test coverage ci dialyzer e2e
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
+	@echo "Targets: setup, deps, assets, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
 
 setup:
 	$(MIX) setup
 
 deps:
 	$(MIX) deps.get
+
+# The stylesheet is embedded at compile time, so `build` runs this first.
+assets:
+	$(MIX) assets.build
 
 build:
 	$(MIX) build

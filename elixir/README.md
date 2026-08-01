@@ -160,9 +160,25 @@ The observability UI now runs on a minimal Phoenix stack:
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 
+### Styling
+
+The stylesheet is authored in `assets/css/app.css` and built by Tailwind into
+`priv/static/dashboard.css`, which `SymphonyElixirWeb.StaticAssets` embeds into
+the escript at compile time. Two consequences:
+
+- `mix build` runs `mix assets.build` first; editing the source CSS without
+  rebuilding ships the previous stylesheet inside the binary.
+- The built file is committed, because compilation reads it. `mix setup`
+  installs the standalone Tailwind executable, so no Node toolchain is needed.
+
+The token layer (palette, semantic `--color-*` names, type scale) is shared with
+the desktop client so the two surfaces stay visually consistent; only the accent
+diverges.
+
 ## Project Layout
 
 - `lib/`: application code and Mix tasks
+- `assets/css/app.css`: dashboard stylesheet source, built by Tailwind
 - `test/`: ExUnit coverage for runtime behavior
 - `WORKFLOW.md`: in-repo workflow contract used by local runs
 - `../.codex/`: repository-local Codex skills and setup helpers

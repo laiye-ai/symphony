@@ -75,14 +75,19 @@ defmodule SymphonyElixir.MixProject do
       {:solid, "~> 1.2"},
       {:ecto, "~> 3.13"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
+      {:tailwind, "~> 0.4", only: [:dev, :test], runtime: false}
     ]
   end
 
+  # The stylesheet is embedded into the escript at compile time, so it has to be
+  # built before anything compiles -- otherwise the binary ships whatever CSS
+  # happened to be on disk from the previous build.
   defp aliases do
     [
-      setup: ["deps.get"],
-      build: ["escript.build"],
+      setup: ["deps.get", "tailwind.install --if-missing"],
+      "assets.build": ["tailwind default --minify"],
+      build: ["assets.build", "escript.build"],
       lint: ["specs.check", "credo --strict"]
     ]
   end

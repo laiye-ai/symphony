@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Codex.Activity
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -17,6 +18,11 @@ defmodule SymphonyElixir.Orchestrator do
   @rate_limited_retry_delay_cap_ms 600_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  # Semantic events only; streaming deltas never reach the trail, so this holds
+  # a meaningful stretch of history rather than a second of noise.
+  @activity_trail_limit 50
+  @stdout_tail_limit 2_048
+  @recent_sessions_limit 20
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -40,6 +46,8 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
+      recent: [],
+      observed: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -130,6 +138,7 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
+        state = record_recent_session(state, issue_id, running_entry, reason)
         session_id = running_entry_session_id(running_entry)
 
         state =
@@ -228,9 +237,14 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      state = record_observed_issues(state, issues)
+
+      if available_slots(state) > 0 do
+        choose_issues(issues, state)
+      else
+        state
+      end
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -273,11 +287,63 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
         state
-
-      false ->
-        state
     end
   end
+
+  # Every poll already returns the issues that have no live session -- they were
+  # simply discarded. Retaining them is what lets the dashboard show work that is
+  # parked (waiting on CI, on review, on a free worker) instead of pretending the
+  # only issues that exist are the ones currently burning tokens.
+  # Issues that are running or retrying are filtered out when the snapshot is
+  # projected, not here: dispatch happens later in this same poll cycle, so
+  # anything excluded now would still be excluded a moment after it started
+  # running. Keeping every routable issue also keeps its dwell timer continuous
+  # across a session instead of restarting it as a fresh sighting.
+  defp record_observed_issues(%State{} = state, issues) when is_list(issues) do
+    now = DateTime.utc_now()
+    active_states = active_state_set()
+
+    observed =
+      issues
+      |> Enum.filter(&(match?(%Issue{}, &1) and issue_routable_to_worker?(&1)))
+      |> Map.new(&{&1.id, observed_entry(state.observed, &1, now, active_states)})
+
+    %{state | observed: observed}
+  end
+
+  defp record_observed_issues(%State{} = state, _issues), do: state
+
+  defp observed_entry(previous, %Issue{} = issue, now, active_states) do
+    {state_since, exact?} = observed_state_since(Map.get(previous, issue.id), issue, now)
+
+    %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+      url: issue.url,
+      labels: Issue.label_names(issue),
+      state_since: state_since,
+      state_since_exact?: exact?,
+      # Issues in a state the orchestrator dispatches from are queued; the rest
+      # are parked on CI or a human. Those need different people to act, so they
+      # do not share a lane.
+      active_state?: MapSet.member?(active_states, normalize_issue_state(issue.state)),
+      last_seen_at: now
+    }
+  end
+
+  # Dwell time can only be inferred from transitions we witnessed. On the first
+  # sighting -- including every orchestrator restart -- the issue may have been
+  # parked long before, so the duration is a lower bound and is flagged as such
+  # rather than rendered as if it were exact.
+  defp observed_state_since(%{state: previous_state, state_since: since, state_since_exact?: exact?}, %Issue{} = issue, _now)
+       when previous_state == issue.state do
+    {since, exact?}
+  end
+
+  defp observed_state_since(%{}, %Issue{}, now), do: {now, true}
+  defp observed_state_since(_previous, %Issue{}, now), do: {now, false}
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
@@ -716,6 +782,8 @@ defmodule SymphonyElixir.Orchestrator do
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
+        started_at = DateTime.utc_now()
+
         running =
           Map.put(state.running, issue.id, %{
             pid: pid,
@@ -737,7 +805,13 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
+            started_at: started_at,
+            activity: Activity.initial(started_at),
+            last_progress_at: started_at,
+            activity_trail: [],
+            plan: nil,
+            diff_stats: nil,
+            stdout_tail: ""
           })
 
         %{
@@ -1142,6 +1216,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           issue_id: issue_id,
           identifier: metadata.identifier,
+          title: metadata.issue.title,
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
@@ -1155,7 +1230,13 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
-          runtime_seconds: running_seconds(metadata.started_at, now)
+          runtime_seconds: running_seconds(metadata.started_at, now),
+          activity: Map.get(metadata, :activity),
+          last_progress_at: Map.get(metadata, :last_progress_at),
+          activity_trail: Map.get(metadata, :activity_trail, []),
+          plan: Map.get(metadata, :plan),
+          diff_stats: Map.get(metadata, :diff_stats),
+          stdout_tail: Map.get(metadata, :stdout_tail, "")
         }
       end)
 
@@ -1173,10 +1254,22 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    observed =
+      state.observed
+      |> Map.values()
+      |> Enum.reject(&(Map.has_key?(state.running, &1.issue_id) or Map.has_key?(state.retry_attempts, &1.issue_id)))
+      |> Enum.map(&Map.put(&1, :state_seconds, running_seconds(&1.state_since, now)))
+      |> Enum.sort_by(& &1.state_seconds, :desc)
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
+       recent: state.recent,
+       observed: observed,
+       # The team's declared pipeline order, so the dashboard groups live
+       # sessions by workflow stage without hardcoding this team's state names.
+       active_states: Config.settings!().tracker.active_states,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1214,7 +1307,9 @@ defmodule SymphonyElixir.Orchestrator do
     turn_count = Map.get(running_entry, :turn_count, 0)
 
     {
-      Map.merge(running_entry, %{
+      running_entry
+      |> apply_activity_effects(update, timestamp)
+      |> Map.merge(%{
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
@@ -1230,6 +1325,83 @@ defmodule SymphonyElixir.Orchestrator do
       }),
       token_delta
     }
+  end
+
+  # Every codex event -- streaming deltas included -- proves the session is
+  # still alive, so all of them refresh the heartbeat. Only the semantic ones
+  # are allowed to change what the session is reported to be doing.
+  defp apply_activity_effects(running_entry, update, timestamp) do
+    effects = Activity.observe(update)
+    progress_at = timestamp || DateTime.utc_now()
+
+    running_entry
+    |> Map.put(:last_progress_at, progress_at)
+    |> merge_activity(effects)
+    |> merge_activity_trail(effects)
+    |> merge_effect(effects, :plan, :plan)
+    |> merge_effect(effects, :diff, :diff_stats)
+    |> merge_stdout_tail(effects)
+  end
+
+  defp merge_activity(running_entry, %{activity: activity}) do
+    current = Map.get(running_entry, :activity)
+    Map.put(running_entry, :activity, Activity.advance(current, activity))
+  end
+
+  defp merge_activity(running_entry, _effects), do: running_entry
+
+  defp merge_activity_trail(running_entry, %{trail: entry}) do
+    trail =
+      running_entry
+      |> Map.get(:activity_trail, [])
+      |> then(&[entry | &1])
+      |> Enum.take(@activity_trail_limit)
+
+    Map.put(running_entry, :activity_trail, trail)
+  end
+
+  defp merge_activity_trail(running_entry, _effects), do: running_entry
+
+  defp merge_effect(running_entry, effects, effect_key, entry_key) do
+    case Map.fetch(effects, effect_key) do
+      {:ok, value} -> Map.put(running_entry, entry_key, value)
+      :error -> running_entry
+    end
+  end
+
+  defp merge_stdout_tail(running_entry, %{stdout: chunk}) do
+    tail =
+      running_entry
+      |> Map.get(:stdout_tail, "")
+      |> Kernel.<>(chunk)
+      |> trim_stdout_tail()
+
+    Map.put(running_entry, :stdout_tail, tail)
+  end
+
+  defp merge_stdout_tail(running_entry, _effects), do: running_entry
+
+  # Build output can be arbitrarily large; only the visible tail is worth
+  # keeping resident per session.
+  defp trim_stdout_tail(tail) when byte_size(tail) <= @stdout_tail_limit, do: tail
+
+  defp trim_stdout_tail(tail) do
+    tail
+    |> binary_part(byte_size(tail) - @stdout_tail_limit, @stdout_tail_limit)
+    |> sanitize_trimmed_stdout()
+  end
+
+  # Slicing by bytes can cut a multi-byte grapheme in half; drop the partial
+  # leading codepoint rather than emit invalid UTF-8 to the dashboard.
+  defp sanitize_trimmed_stdout(tail) do
+    if String.valid?(tail) do
+      tail
+    else
+      case tail do
+        <<_byte, rest::binary>> -> sanitize_trimmed_stdout(rest)
+        _ -> ""
+      end
+    end
   end
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
@@ -1325,6 +1497,49 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_session_completion_totals(state, _running_entry), do: state
+
+  # A session vanishes from `running` the moment its task exits, which used to
+  # make "what did the agent just do?" unanswerable -- the most useful question
+  # when an issue lands in review or retry. Keep a bounded tail of finished
+  # sessions so the dashboard can still answer it.
+  defp record_recent_session(%State{} = state, issue_id, running_entry, reason) when is_map(running_entry) do
+    finished_at = DateTime.utc_now()
+    started_at = Map.get(running_entry, :started_at)
+
+    entry = %{
+      issue_id: issue_id,
+      identifier: Map.get(running_entry, :identifier),
+      title: running_entry |> Map.get(:issue) |> issue_title(),
+      outcome: if(reason == :normal, do: :completed, else: :failed),
+      reason: recent_session_reason(reason),
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      session_id: Map.get(running_entry, :session_id),
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      started_at: started_at,
+      finished_at: finished_at,
+      runtime_seconds: running_seconds(started_at, finished_at),
+      tokens: %{
+        input_tokens: Map.get(running_entry, :codex_input_tokens, 0),
+        output_tokens: Map.get(running_entry, :codex_output_tokens, 0),
+        total_tokens: Map.get(running_entry, :codex_total_tokens, 0)
+      },
+      last_activity: Map.get(running_entry, :activity),
+      activity_trail: Map.get(running_entry, :activity_trail, []),
+      plan: Map.get(running_entry, :plan),
+      diff_stats: Map.get(running_entry, :diff_stats)
+    }
+
+    %{state | recent: Enum.take([entry | state.recent], @recent_sessions_limit)}
+  end
+
+  defp record_recent_session(state, _issue_id, _running_entry, _reason), do: state
+
+  defp recent_session_reason(:normal), do: nil
+  defp recent_session_reason(reason), do: inspect(reason)
+
+  defp issue_title(%Issue{title: title}), do: title
+  defp issue_title(_issue), do: nil
 
   defp refresh_runtime_config(%State{} = state) do
     config = Config.settings!()

@@ -28,8 +28,43 @@ defmodule SymphonyElixirWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
+            // Whether a message is actually clipped depends on the rendered
+            // width, which the server cannot know, so the browser measures it
+            // and the expand control is revealed only when there is something
+            // hidden to reveal.
+            //
+            // The card is observed rather than measured once: at mount the pane
+            // has not settled to its final width yet, and `updated` only fires
+            // when LiveView patches this element, which never happens while the
+            // message text stays the same. A single early measurement therefore
+            // sticks, and a message that fits ends up offering to expand.
+            function markClamped(el) {
+              var card = el.closest(".trail-card");
+              if (!card) return;
+              card.classList.toggle("is-clamped", el.scrollHeight - el.clientHeight > 1);
+            }
+
+            var hooks = {
+              Clamp: {
+                mounted: function () {
+                  var self = this;
+                  markClamped(this.el);
+
+                  var card = this.el.closest(".trail-card");
+
+                  if (card && window.ResizeObserver) {
+                    this.observer = new ResizeObserver(function () { markClamped(self.el); });
+                    this.observer.observe(card);
+                  }
+                },
+                updated: function () { markClamped(this.el); },
+                destroyed: function () { if (this.observer) this.observer.disconnect(); }
+              }
+            };
+
             var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
-              params: {_csrf_token: csrfToken}
+              params: {_csrf_token: csrfToken},
+              hooks: hooks
             });
 
             liveSocket.connect();

@@ -342,11 +342,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
+             "counts" => %{"running" => 1, "retrying" => 1, "observed" => 0},
+             "active_states" => ["Todo", "In Progress", "Agent Review"],
              "running" => [
                %{
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
+                 "title" => nil,
                  "state" => "In Progress",
                  "worker_host" => nil,
                  "workspace_path" => nil,
@@ -356,9 +358,15 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
+                 "activity" => nil,
+                 "last_progress_at" => nil,
+                 "plan" => nil,
+                 "diff_stats" => nil,
                  "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
                }
              ],
+             "observed" => [],
+             "recent" => [],
              "retrying" => [
                %{
                  "issue_id" => "issue-retry",
@@ -392,6 +400,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              },
              "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
              "running" => %{
+               "title" => nil,
                "worker_host" => nil,
                "workspace_path" => nil,
                "session_id" => "thread-http",
@@ -401,9 +410,17 @@ defmodule SymphonyElixir.ExtensionsTest do
                "last_event" => "notification",
                "last_message" => "rendered",
                "last_event_at" => nil,
+               "activity" => nil,
+               "last_progress_at" => nil,
+               "activity_trail" => [],
+               "plan" => nil,
+               "diff_stats" => nil,
+               "stdout_tail" => "",
                "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
              },
              "retry" => nil,
+             "recent" => nil,
+             "observed" => nil,
              "logs" => %{"codex_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
@@ -502,11 +519,36 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "/assets/app.js"
     refute html =~ "<style>"
 
+    # The served stylesheet is Tailwind's minified build output, so it is checked
+    # for having actually been produced and for carrying the app's own rules.
+    # The design invariants below are asserted against the source, which is what
+    # a future edit would break.
     dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
-    assert dashboard_css =~ ":root {"
-    assert dashboard_css =~ ".status-badge-live"
-    assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
-    assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
+    assert dashboard_css =~ "tailwindcss v4"
+    assert dashboard_css =~ ".rail-row-selected"
+    assert dashboard_css =~ "prefers-color-scheme:dark"
+    assert dashboard_css =~ "[data-phx-main].phx-connected .conn-live"
+    assert dashboard_css =~ "[data-phx-main].phx-connected .conn-offline"
+    assert dashboard_css =~ ".trail-row:not(.trail-open).trail-thinking .trail-head"
+    assert dashboard_css =~ ".trail-card.is-clamped .trail-toggle"
+
+    source_css = File.read!(Path.join(:code.priv_dir(:symphony_elixir), "../assets/css/app.css"))
+    # The shell must be bounded, not merely tall: with min-height the page grows
+    # to fit the timeline and the inner overflow never engages.
+    assert source_css =~ ~r/\.shell \{[^}]*h-screen[^}]*overflow-hidden/s
+    refute source_css =~ ~r/\.shell \{[^}]*min-h-screen/s
+    # Text never sits on the saturated accent: white on it is 3.2:1, under the
+    # 4.5:1 floor. The selected row therefore fills with the container tint.
+    assert source_css =~ ~r/\.rail-row-selected,[^}]*background: var\(--color-primary-container\);/s
+    assert source_css =~ ~r/@media \(prefers-color-scheme: dark\)[^}]*--color-on-primary-container:/s
+    # The live row shares its kind with turn boundaries, so every rule that
+    # hides boundary chrome must exclude it -- otherwise the current activity,
+    # the one line the page exists to show, renders blank while thinking.
+    refute source_css =~ "\n  .trail-thinking .trail-head"
+    # The expand affordance stays hidden until the browser reports a clip, and
+    # never draws a focus ring around the icon.
+    assert source_css =~ ~r/\.trail-toggle \{[^}]*hidden/s
+    assert source_css =~ ~r/\.trail-toggle \{[^}]*outline: none;/s
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -518,6 +560,380 @@ defmodule SymphonyElixir.ExtensionsTest do
       response(get(build_conn(), "/vendor/phoenix_live_view/phoenix_live_view.js"), 200)
 
     assert live_view_js =~ "var LiveView = (() => {"
+  end
+
+  test "dashboard liveview reports the current activity and heartbeat instead of the last raw event" do
+    orchestrator_name = Module.concat(__MODULE__, :ActivityDashboardOrchestrator)
+    now = DateTime.utc_now()
+
+    snapshot =
+      put_in(static_snapshot().running, [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          title: "Desktop: move the privacy review into the session stream",
+          state: "In Progress",
+          session_id: "thread-http",
+          turn_count: 2,
+          last_codex_event: :notification,
+          # The last raw event is exactly the sort of noise the old column showed.
+          last_codex_message: %{
+            event: :notification,
+            message: %{"method" => "item/reasoning/textDelta", "params" => %{"delta" => "…"}}
+          },
+          last_codex_timestamp: now,
+          codex_input_tokens: 4,
+          codex_output_tokens: 8,
+          codex_total_tokens: 12,
+          started_at: DateTime.add(now, -300, :second),
+          activity: %{
+            kind: :command,
+            label: "Running command",
+            detail: "pnpm vitest run src/interaction",
+            item_id: "exec-1",
+            since: DateTime.add(now, -41, :second),
+            soft: false
+          },
+          last_progress_at: DateTime.add(now, -600, :second),
+          plan: %{steps: [], completed: 4, total: 7},
+          diff_stats: %{files: 6, added: 148, removed: 32}
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    assert html =~ "Running command"
+    assert html =~ ~s(<p class="detail-title">Desktop: move the privacy review into the session stream</p>)
+    assert html =~ ~s(<span class="chip chip-danger">running</span>)
+    assert html =~ "pnpm vitest run src/interaction"
+    assert html =~ "4/7"
+    assert html =~ "+148"
+    assert html =~ "−32"
+    assert html =~ "in 6 files"
+    # Ten minutes without an event is a stalled session: it must sort into the
+    # attention lane and read as stalled rather than as busy.
+    assert html =~ "Needs attention · 1"
+    assert html =~ "dot dot-danger"
+    assert html =~ ~s(class="tone-danger")
+    # Loose on the seconds: the clock advances between building the snapshot and
+    # rendering it, and the point of the assertion is the ten-minute gap.
+    assert html =~ ~r{10m \d+s ago</b>\s*since last event}
+    refute html =~ "item/reasoning/textDelta"
+  end
+
+  test "dashboard drops stale command output and ranks stream events by kind" do
+    orchestrator_name = Module.concat(__MODULE__, :StreamOrchestrator)
+    now = DateTime.utc_now()
+
+    snapshot =
+      put_in(static_snapshot().running, [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          state: "In Progress",
+          session_id: "thread-http",
+          turn_count: 1,
+          last_codex_event: :notification,
+          last_codex_message: nil,
+          last_codex_timestamp: now,
+          codex_input_tokens: 1,
+          codex_output_tokens: 1,
+          codex_total_tokens: 2,
+          started_at: now,
+          last_progress_at: now,
+          # Reasoning, not a command -- so the buffered output below belongs to
+          # something that already finished.
+          activity: %{kind: :thinking, label: "Thinking", detail: nil, item_id: nil, since: now, soft: false},
+          stdout_tail: "[symphony-owner-gate] ALLOW Issue MT-HTTP",
+          activity_trail: [
+            %{at: now, kind: :failed, title: "node review-preflight.mjs", meta: "exit 2"},
+            %{at: now, kind: :writing, title: "I will run the owner gate first, then read the review policy.", meta: nil},
+            %{at: now, kind: :command, title: "git status --short", meta: "exit 0"},
+            %{at: now, kind: :starting, title: "Session started", meta: nil}
+          ]
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    refute html =~ "symphony-owner-gate"
+    assert html =~ ~s(class="trail-row trail-failed")
+    assert html =~ ~s(class="trail-row trail-writing")
+    assert html =~ ~s(class="trail-row trail-command")
+    assert html =~ ~s(class="trail-row trail-starting")
+
+    # The current activity is the head of the same timeline, still open.
+    assert html =~ ~s(class="trail-row trail-open trail-thinking")
+    assert html =~ "in progress"
+
+    # Structured facts render as their own field, not glued into the title.
+    assert html =~ ~s(<span class="trail-kind">failed</span>)
+    assert html =~ ~s(<span class="trail-kind">agent message</span>)
+    assert html =~ "exit 2"
+    assert html =~ "node review-preflight.mjs"
+  end
+
+  test "agent messages toggle between clamped and full text" do
+    orchestrator_name = Module.concat(__MODULE__, :ExpandOrchestrator)
+    now = DateTime.utc_now()
+    long_message = String.duplicate("已定位到一个真实竞态，", 20) <> "\n\n继续核对其余 AC。"
+
+    snapshot =
+      put_in(static_snapshot().running, [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          state: "In Progress",
+          session_id: "thread-http",
+          turn_count: 1,
+          last_codex_event: :notification,
+          last_codex_message: nil,
+          last_codex_timestamp: now,
+          codex_input_tokens: 1,
+          codex_output_tokens: 1,
+          codex_total_tokens: 2,
+          started_at: now,
+          last_progress_at: now,
+          activity: %{kind: :thinking, label: "Thinking", detail: nil, item_id: nil, since: now, soft: false},
+          stdout_tail: "",
+          activity_trail: [
+            %{at: now, kind: :writing, title: long_message, meta: nil},
+            %{at: now, kind: :command, title: "git status", meta: "exit 0"}
+          ]
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/")
+
+    # Whether the text is clipped is measured in the browser, so the control
+    # ships for every message and CSS reveals it; only messages get one.
+    assert html =~ ~s(phx-hook="Clamp")
+    # The control is an icon, not a word, and reports its state to assistive tech.
+    assert html =~ ~s(aria-expanded="false")
+    assert html =~ "<svg"
+    assert length(String.split(html, ~s(class="trail-toggle"))) == 2
+    refute html =~ "trail-body-expanded"
+    refute html =~ "is-expanded"
+
+    html = view |> element("button.trail-toggle") |> render_click()
+
+    assert html =~ "trail-body-expanded"
+    assert html =~ "is-expanded"
+    assert html =~ "继续核对其余 AC。"
+
+    html = view |> element("button.trail-toggle") |> render_click()
+
+    refute html =~ "trail-body-expanded"
+    refute html =~ "is-expanded"
+  end
+
+  test "live sessions are grouped by tracker stage in the configured order" do
+    orchestrator_name = Module.concat(__MODULE__, :StageOrchestrator)
+    now = DateTime.utc_now()
+
+    session = fn identifier, state ->
+      %{
+        issue_id: "issue-#{identifier}",
+        identifier: identifier,
+        state: state,
+        session_id: "thread-#{identifier}",
+        turn_count: 1,
+        last_codex_event: :notification,
+        last_codex_message: nil,
+        last_codex_timestamp: now,
+        codex_input_tokens: 1,
+        codex_output_tokens: 1,
+        codex_total_tokens: 2,
+        started_at: now,
+        last_progress_at: now,
+        activity: %{kind: :thinking, label: "Thinking", detail: nil, item_id: nil, since: now, soft: false},
+        stdout_tail: "",
+        activity_trail: []
+      }
+    end
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:active_states, ["Todo", "In Progress", "Rework", "Agent Review"])
+      |> Map.put(:running, [
+        session.("MT-REVIEW", "Agent Review"),
+        session.("MT-PROG", "In Progress"),
+        session.("MT-REWORK", "Rework"),
+        session.("MT-ODD", "Some Custom State")
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    lanes = Regex.scan(~r/lane-label lane-label-([a-z0-9-]+)">([^<]+)/, html) |> Enum.map(&Enum.at(&1, 2))
+
+    # Pipeline order comes from the workflow config, not from this module, and
+    # a stage with nobody in it does not take up a lane.
+    assert ["In Progress · 1", "Rework · 1", "Agent Review · 1" | rest] = Enum.map(lanes, &String.trim/1)
+    refute Enum.any?(lanes, &String.contains?(&1, "Todo"))
+    # A state the config never listed still gets a home rather than vanishing.
+    assert Enum.any?(rest, &String.contains?(&1, "Some Custom State"))
+    assert html =~ "lane-label-stage-agent-review"
+  end
+
+  test "runs of plumbing collapse into one row and expand on demand" do
+    orchestrator_name = Module.concat(__MODULE__, :GroupingOrchestrator)
+    now = DateTime.utc_now()
+
+    trail =
+      [
+        %{at: now, kind: :writing, title: "Preflight is green, starting the review.", meta: nil},
+        %{at: now, kind: :command, title: "gh pr view 218", meta: "exit 0"},
+        %{at: now, kind: :tool, title: "linear_graphql", meta: "Called"},
+        %{at: now, kind: :command, title: "git status --short", meta: "exit 0"},
+        %{at: now, kind: :command, title: "rg privacy src/", meta: "exit 0"},
+        # A failure breaks the run: it is the thing you came to find.
+        %{at: now, kind: :failed, title: "mix dialyzer", meta: "exit 2"},
+        %{at: now, kind: :command, title: "git log --oneline", meta: "exit 0"},
+        %{at: now, kind: :command, title: "git diff --stat", meta: "exit 0"}
+      ]
+
+    snapshot =
+      put_in(static_snapshot().running, [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          state: "In Progress",
+          session_id: "thread-http",
+          turn_count: 1,
+          last_codex_event: :notification,
+          last_codex_message: nil,
+          last_codex_timestamp: now,
+          codex_input_tokens: 1,
+          codex_output_tokens: 1,
+          codex_total_tokens: 2,
+          started_at: now,
+          last_progress_at: now,
+          activity: %{kind: :thinking, label: "Thinking", detail: nil, item_id: nil, since: now, soft: false},
+          stdout_tail: "",
+          activity_trail: trail
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/")
+
+    # The run of four before the failure collapses; the pair after it is too
+    # short to be worth a click and stays inline.
+    assert html =~ "4 steps"
+    refute html =~ "2 steps"
+    assert html =~ "git log --oneline"
+    # Collapsed steps are not in the document until asked for.
+    refute html =~ "rg privacy src/"
+    # What matters stays first class.
+    assert html =~ "Preflight is green"
+    assert html =~ "mix dialyzer"
+
+    html = view |> element("button.trail-group-head") |> render_click()
+
+    assert html =~ "rg privacy src/"
+    assert html =~ "linear_graphql"
+  end
+
+  test "an issue with both a live session and a finished one is listed once" do
+    orchestrator_name = Module.concat(__MODULE__, :RelistedOrchestrator)
+    now = DateTime.utc_now()
+
+    # A completed session does not prevent re-dispatch, so the orchestrator
+    # genuinely holds both records for CLA-RETRY at the same time.
+    snapshot =
+      Map.put(static_snapshot(), :recent, [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          title: "Relisted",
+          outcome: :completed,
+          reason: nil,
+          worker_host: nil,
+          session_id: "thread-old",
+          turn_count: 1,
+          started_at: DateTime.add(now, -600, :second),
+          finished_at: DateTime.add(now, -300, :second),
+          runtime_seconds: 300,
+          tokens: %{input_tokens: 1, output_tokens: 1, total_tokens: 2},
+          diff_stats: nil,
+          plan: nil,
+          activity_trail: [%{at: now, kind: :turn_done, title: "Turn completed", meta: nil}]
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/?issue=MT-HTTP")
+
+    # It is working, so it belongs to the working lane and nowhere else.
+    assert html =~ "In Progress · 1"
+    refute html =~ "Recently finished"
+    # The finished session is still reachable, in the pane where history lives.
+    assert html =~ "Last session"
+  end
+
+  test "parked issues report a lower-bound dwell time when the transition was not witnessed" do
+    orchestrator_name = Module.concat(__MODULE__, :ObservedOrchestrator)
+
+    snapshot =
+      Map.put(static_snapshot(), :observed, [
+        %{
+          issue_id: "issue-parked",
+          identifier: "MT-PARKED",
+          title: "Waiting on CI",
+          state: "Agent Review",
+          url: nil,
+          labels: ["gate:ci"],
+          state_since: DateTime.utc_now(),
+          state_since_exact?: false,
+          state_seconds: 900,
+          active_state?: false,
+          last_seen_at: DateTime.utc_now()
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/?issue=MT-PARKED")
+
+    assert html =~ "Handed off · 1"
+    assert html =~ "no session will start"
+    assert html =~ "gate:ci"
+    # The orchestrator never saw the transition, so the duration is a bound.
+    assert html =~ "≥15m 0s"
+  end
+
+  test "dashboard selection is driven by the query string and survives a reload" do
+    orchestrator_name = Module.concat(__MODULE__, :SelectionOrchestrator)
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: static_snapshot())
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    # A deep link opens straight onto the issue it names, so a stalled session
+    # can be handed to someone else as a URL.
+    {:ok, view, html} = live(build_conn(), "/?issue=MT-RETRY")
+    assert html =~ ~s(<span class="detail-id">MT-RETRY</span>)
+    assert html =~ "Waiting to retry · attempt 2"
+
+    html = view |> element(~s(button[phx-value-issue="MT-HTTP"])) |> render_click()
+    assert html =~ ~s(<span class="detail-id">MT-HTTP</span>)
+    assert_patched(view, "/?issue=MT-HTTP")
   end
 
   test "dashboard liveview renders and refreshes over pubsub" do
@@ -539,21 +955,22 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Operations Dashboard"
+    assert html =~ "Symphony"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "rendered"
-    assert html =~ "Runtime"
-    assert html =~ "Live"
-    assert html =~ "Offline"
-    assert html =~ "Copy ID"
-    assert html =~ "Codex update"
+    assert html =~ "In Progress · 1"
+    assert html =~ "Retrying · 1"
+    # The first issue is selected automatically so the pane is never blank.
+    assert html =~ ~s(class="rail-row rail-row-selected")
+    assert html =~ ~s(<a href="/api/v1/MT-HTTP">)
+    # Both connection states ship; CSS picks between them off the socket class.
+    assert html =~ "conn-live"
+    assert html =~ "conn-offline"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
     refute html =~ "Transport"
-    assert html =~ "status-badge-live"
-    assert html =~ "status-badge-offline"
 
     updated_snapshot =
       put_in(snapshot.running, [
@@ -641,11 +1058,11 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "observed" => 0}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
-    assert dashboard_css.body =~ ":root {"
+    assert dashboard_css.body =~ "tailwindcss v4"
 
     phoenix_js = Req.get!("http://127.0.0.1:#{port}/vendor/phoenix/phoenix.js")
     assert phoenix_js.status == 200
@@ -711,6 +1128,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           error: "boom"
         }
       ],
+      active_states: ["Todo", "In Progress", "Agent Review"],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }

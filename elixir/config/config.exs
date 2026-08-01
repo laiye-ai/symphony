@@ -14,3 +14,10 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   secret_key_base: String.duplicate("s", 64),
   check_origin: false,
   server: false
+
+config :tailwind,
+  version: "4.1.14",
+  default: [
+    args: ~w(--input=assets/css/app.css --output=priv/static/dashboard.css),
+    cd: Path.expand("..", __DIR__)
+  ]
