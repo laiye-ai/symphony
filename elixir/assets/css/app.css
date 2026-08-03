@@ -334,10 +334,6 @@
     @apply flex min-h-0 min-w-0 flex-col;
   }
 
-  .detail-timeline {
-    @apply flex min-h-0 flex-1 flex-col;
-  }
-
   .detail-head {
     @apply shrink-0 px-4 py-2.5;
     border-bottom: 1px solid var(--color-outline);
@@ -378,6 +374,14 @@
   .detail-block {
     @apply shrink-0 px-4 py-3;
     border-bottom: 1px solid var(--color-outline);
+  }
+
+  /* Must come after .detail-block: the timeline is one, and it is the block that
+     takes the slack. Ordered the other way, .detail-block's shrink-0 wins over
+     flex-1's shrink and the section is pinned at its flex-basis of 0 -- grow
+     only hands out space that is left over, so a tall sibling collapses it. */
+  .detail-timeline {
+    @apply flex min-h-0 flex-1 shrink flex-col;
   }
 
   .metrics {
@@ -808,8 +812,9 @@
     @apply flex flex-wrap items-baseline gap-x-3.5 px-4 py-2;
   }
 
+  /* It lives inside a .detail-block, which has already paid for the gutter. */
   .detail-foot {
-    @apply text-secondary;
+    @apply px-0 text-secondary;
   }
 
   .detail-foot span:last-child {

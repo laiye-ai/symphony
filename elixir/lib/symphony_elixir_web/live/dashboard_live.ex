@@ -258,12 +258,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
     </section>
 
     <%= if @detail.recent do %>
-      <section class="detail-block">
+      <section class={history_block_class(@detail)}>
         <p class="block-label">
           Last session · ended <%= format_ago(@detail.recent.finished_at, @now) %>
         </p>
         <p :if={@detail.recent.reason} class="muted mono"><%= @detail.recent.reason %></p>
-        <ol :if={@detail.recent.activity_trail != []} class="trail">
+        <ol :if={show_recent_trail?(@detail)} class="trail">
           <.trail_rows entries={@detail.recent.activity_trail} expanded={@expanded} />
         </ol>
         <footer class="detail-foot mono muted">
@@ -573,6 +573,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # largest block on the page in service of something no longer happening.
   defp show_stdout?(entry) do
     activity_kind(entry) == :command and entry.stdout_tail not in [nil, ""]
+  end
+
+  # An issue can hold a finished session and a live one at once, and only one of
+  # them can own the pane's scroll area. The live timeline wins: it is what the
+  # session is doing now. Two unbounded trails in one column is also what breaks
+  # the layout -- the history block cannot shrink, so it eats the height the
+  # timeline was supposed to grow into and the timeline collapses to nothing.
+  defp show_recent_trail?(detail) do
+    is_nil(detail.running) and detail.recent.activity_trail != []
+  end
+
+  defp history_block_class(detail) do
+    if show_recent_trail?(detail), do: "detail-block detail-timeline", else: "detail-block"
   end
 
   defp progress_style(%{completed: completed, total: total}) when is_integer(total) and total > 0 do

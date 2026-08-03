@@ -549,6 +549,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     # never draws a focus ring around the icon.
     assert source_css =~ ~r/\.trail-toggle \{[^}]*hidden/s
     assert source_css =~ ~r/\.trail-toggle \{[^}]*outline: none;/s
+    # The timeline is a .detail-block, so its rule has to come after that one.
+    # Declared before it, .detail-block's shrink-0 overrides flex-1's shrink and
+    # the section stays pinned at a flex-basis of 0: grow only distributes space
+    # that is left over, so any tall sibling collapses the timeline to nothing.
+    assert :binary.match(source_css, ".detail-timeline {") >
+             :binary.match(source_css, ".detail-block {")
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -885,6 +891,46 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "Recently finished"
     # The finished session is still reachable, in the pane where history lives.
     assert html =~ "Last session"
+    # Only its summary though. The live timeline owns the pane's scroll area, and
+    # a second unbounded trail beside it is what collapses the timeline to zero.
+    refute html =~ "Turn completed"
+    assert length(String.split(html, "detail-timeline")) == 2
+  end
+
+  test "a finished session with no live one takes over the timeline's scroll area" do
+    orchestrator_name = Module.concat(__MODULE__, :HistoryOnlyOrchestrator)
+    now = DateTime.utc_now()
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:running, [])
+      |> Map.put(:recent, [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          title: "Relisted",
+          outcome: :completed,
+          reason: nil,
+          worker_host: nil,
+          session_id: "thread-old",
+          turn_count: 1,
+          started_at: DateTime.add(now, -600, :second),
+          finished_at: DateTime.add(now, -300, :second),
+          runtime_seconds: 300,
+          tokens: %{input_tokens: 1, output_tokens: 1, total_tokens: 2},
+          diff_stats: nil,
+          plan: nil,
+          activity_trail: [%{at: now, kind: :turn_done, title: "Turn completed", meta: nil}]
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/?issue=MT-HTTP")
+
+    assert html =~ "detail-block detail-timeline"
+    assert html =~ "Turn completed"
   end
 
   test "parked issues report a lower-bound dwell time when the transition was not witnessed" do
