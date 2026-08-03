@@ -12,6 +12,11 @@ defmodule SymphonyElixir.Tracker.Memory do
     {:ok, issue_entries()}
   end
 
+  @spec fetch_parked_issues() :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_parked_issues do
+    fetch_issues_by_states(SymphonyElixir.Config.settings!().tracker.parked_states)
+  end
+
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) do
     normalized_states =

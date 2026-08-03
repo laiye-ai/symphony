@@ -57,6 +57,7 @@ defmodule SymphonyElixirWeb.Presenter do
       observed: Enum.map(observed, &observed_entry_payload/1),
       recent: snapshot |> Map.get(:recent, []) |> Enum.map(&recent_entry_payload/1),
       active_states: Map.get(snapshot, :active_states, []),
+      parked_states: Map.get(snapshot, :parked_states, []),
       codex_totals: snapshot.codex_totals,
       rate_limits: snapshot.rate_limits
     }
@@ -147,6 +148,12 @@ defmodule SymphonyElixirWeb.Presenter do
   # only observed has no session at all and must not read as if it were working.
   defp issue_status(%{running: running}) when not is_nil(running), do: "running"
   defp issue_status(%{retry: retry}) when not is_nil(retry), do: "retrying"
+  # The tracker's state outranks a finished session: the session is over, the
+  # issue is not. An issue that self-parked is the case that matters -- calling
+  # it "finished" hides the one queue that is waiting on a person. This matches
+  # the rail, which already lists such an issue under its parked state rather
+  # than under recently finished.
+  defp issue_status(%{observed: observed}) when not is_nil(observed), do: "observed"
   defp issue_status(%{recent: recent}) when not is_nil(recent), do: "finished"
   defp issue_status(_found), do: "observed"
 

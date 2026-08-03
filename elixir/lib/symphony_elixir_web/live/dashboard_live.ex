@@ -370,7 +370,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       stage_lanes(running, payload.active_states, now),
       {:retrying, "Retrying", Enum.map(payload.retrying, &retry_row/1)},
       {:dispatch, "Awaiting dispatch", Enum.map(dispatch, &observed_row/1)},
-      {:parked, "Handed off", Enum.map(parked, &observed_row/1)},
+      parked_lanes(parked, payload.parked_states),
       {:recent, "Recently finished", Enum.map(finished_only(payload), &recent_row(&1, now))}
     ])
   end
@@ -388,6 +388,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
       {stage_lane_key(state), state, Enum.map(by_state[state], &running_row(&1, now))}
     end)
   end
+
+  # Parked work is split by tracker state for the same reason live work is:
+  # "Gated" wants a decision from you and "Human Review" wants an approval, and
+  # one "Handed off" bucket hides which of the two is asking. Lane order follows
+  # the configured list, so the queue the workflow treats as most urgent reads
+  # first; a state nobody declared still gets a lane rather than vanishing.
+  defp parked_lanes(parked, parked_states) do
+    by_state = Enum.group_by(parked, & &1.state)
+    known = Enum.filter(parked_states, &Map.has_key?(by_state, &1))
+    unknown = by_state |> Map.keys() |> Enum.reject(&(&1 in parked_states)) |> Enum.sort_by(&to_string/1)
+
+    Enum.map(known ++ unknown, fn state ->
+      {"parked-#{stage_lane_key(state)}", parked_lane_label(state), Enum.map(by_state[state], &observed_row/1)}
+    end)
+  end
+
+  defp parked_lane_label(state) when is_binary(state), do: state
+  defp parked_lane_label(_state), do: "Handed off"
 
   defp stage_lane_key(state) do
     state
@@ -492,6 +510,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp detail_status(%{status: "running"} = detail) do
     if blocked_activity?(detail.running), do: "needs attention", else: "running"
   end
+
+  # "observed" is an internal word for "the tracker is the only thing that knows
+  # anything about this". Say what the tracker actually says instead.
+  defp detail_status(%{status: "observed", observed: %{state: state}}) when is_binary(state), do: state
 
   defp detail_status(%{status: status}), do: status
 

@@ -3,6 +3,38 @@ defmodule SymphonyElixir.OrchestratorActivityTest do
 
   alias SymphonyElixir.Codex.Activity
 
+  # The candidate read is deliberately empty: before parked states were read at
+  # all, that meant an empty board, and a self parked issue vanished from it.
+  # The memory tracker cannot show this -- it returns every issue for every
+  # read, so the two lists would be indistinguishable.
+  defmodule TwoListClient do
+    def fetch_candidate_issues, do: {:ok, []}
+
+    def fetch_parked_issues do
+      {:ok,
+       [
+         %Issue{
+           id: "issue-gated",
+           identifier: "MT-GATED",
+           title: "Self parked",
+           state: "Gated",
+           labels: ["gate:decision"],
+           assigned_to_worker: true
+         },
+         %Issue{
+           id: "issue-theirs",
+           identifier: "MT-THEIRS",
+           title: "Someone else's",
+           state: "Gated",
+           assigned_to_worker: false
+         }
+       ]}
+    end
+
+    def fetch_issue_states_by_ids(_ids), do: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+  end
+
   defp start_orchestrator(name) do
     orchestrator_name = Module.concat(__MODULE__, name)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -285,5 +317,43 @@ defmodule SymphonyElixir.OrchestratorActivityTest do
     assert recent.tokens.total_tokens == 4_242
     assert recent.runtime_seconds >= 30
     assert Enum.any?(recent.activity_trail, &(&1.title == "git push"))
+  end
+
+  test "self parked issues stay on the board without becoming dispatchable" do
+    previous_client = Application.get_env(:symphony_elixir, :linear_client_module)
+    Application.put_env(:symphony_elixir, :linear_client_module, TwoListClient)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_active_states: ["Todo"],
+      tracker_parked_states: ["Gated"]
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_client) do
+        Application.delete_env(:symphony_elixir, :linear_client_module)
+      else
+        Application.put_env(:symphony_elixir, :linear_client_module, previous_client)
+      end
+
+      write_workflow_file!(Workflow.workflow_file_path())
+    end)
+
+    pid = start_orchestrator(:Parked)
+    send(pid, :run_poll_cycle)
+
+    %{observed: observed, running: running} = GenServer.call(pid, :snapshot)
+    by_identifier = Map.new(observed, &{&1.identifier, &1})
+
+    # The whole point: an issue that left the active states is still on the
+    # board, carrying the state and the gate label that say who has to act.
+    assert %{state: "Gated", labels: ["gate:decision"], active_state?: false} =
+             by_identifier["MT-GATED"]
+
+    # Watched, never queued. Nothing here is dispatchable.
+    assert running == []
+    # And the parked read is routed like any other: someone else's parked issue
+    # is not this worker's board.
+    refute Map.has_key?(by_identifier, "MT-THEIRS")
   end
 end

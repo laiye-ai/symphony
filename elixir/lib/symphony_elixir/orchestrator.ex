@@ -238,7 +238,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
-      state = record_observed_issues(state, issues)
+      state = record_observed_issues(state, fetch_parked_issues() ++ issues)
 
       if available_slots(state) > 0 do
         choose_issues(issues, state)
@@ -312,6 +312,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_observed_issues(%State{} = state, _issues), do: state
+
+  # An issue that self-parks leaves the states Symphony polls, so without this
+  # it drops off the board entirely: the only trace left is the finished session
+  # that parked it, and a queue that exists to be acted on by a person reads as
+  # "finished". These are merged into the observed map and nowhere else --
+  # `choose_issues` is still handed only the active candidates, and
+  # `should_dispatch_issue?` independently requires an active state.
+  #
+  # A read failure here loses the parked lane for one cycle. Dispatch is the
+  # job, so it keeps going rather than taking the poll down with it.
+  defp fetch_parked_issues do
+    case Tracker.fetch_parked_issues() do
+      {:ok, issues} when is_list(issues) ->
+        issues
+
+      other ->
+        Logger.warning("Could not read parked issues: #{inspect(other)}")
+        []
+    end
+  end
 
   defp observed_entry(previous, %Issue{} = issue, now, active_states) do
     {state_since, exact?} = observed_state_since(Map.get(previous, issue.id), issue, now)
@@ -1270,6 +1290,9 @@ defmodule SymphonyElixir.Orchestrator do
        # The team's declared pipeline order, so the dashboard groups live
        # sessions by workflow stage without hardcoding this team's state names.
        active_states: Config.settings!().tracker.active_states,
+       # Same reason, for the states that are watched but never dispatched: the
+       # declared order puts the most actionable queue at the top of the rail.
+       parked_states: Config.settings!().tracker.parked_states,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{

@@ -111,6 +111,23 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
+    fetch_routed_issues(Config.settings!().tracker.active_states)
+  end
+
+  # Parked work is watched, never dispatched, so it goes through the same
+  # routing filter as a candidate: an issue that would not be routed to this
+  # worker is not this worker's board either. `fetch_issues_by_states/1` looks
+  # like it would do, but it queries with no routing filter at all -- it exists
+  # for the terminal-state check, where whose issue it is does not matter.
+  @spec fetch_parked_issues() :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_parked_issues do
+    case Config.settings!().tracker.parked_states do
+      [] -> {:ok, []}
+      state_names -> fetch_routed_issues(state_names)
+    end
+  end
+
+  defp fetch_routed_issues(state_names) do
     tracker = Config.settings!().tracker
     project_slug = tracker.project_slug
 
@@ -123,7 +140,7 @@ defmodule SymphonyElixir.Linear.Client do
 
       true ->
         with {:ok, routing_filter} <- routing_filter() do
-          do_fetch_by_states(project_slug, tracker.active_states, routing_filter)
+          do_fetch_by_states(project_slug, state_names, routing_filter)
         end
     end
   end

@@ -15,6 +15,11 @@ defmodule SymphonyElixir.ExtensionsTest do
       {:ok, [:candidate]}
     end
 
+    def fetch_parked_issues do
+      send(self(), :fetch_parked_issues_called)
+      {:ok, [:parked]}
+    end
+
     def fetch_issues_by_states(states) do
       send(self(), {:fetch_issues_by_states_called, states})
       {:ok, states}
@@ -191,6 +196,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert SymphonyElixir.Tracker.adapter() == Memory
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_candidate_issues()
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
+    assert {:ok, []} = SymphonyElixir.Tracker.fetch_parked_issues()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_parked_states: ["In Progress"]
+    )
+
+    assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_parked_issues()
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
     assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
@@ -210,6 +224,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, [:candidate]} = Adapter.fetch_candidate_issues()
     assert_receive :fetch_candidate_issues_called
+
+    assert {:ok, [:parked]} = Adapter.fetch_parked_issues()
+    assert_receive :fetch_parked_issues_called
 
     assert {:ok, ["Todo"]} = Adapter.fetch_issues_by_states(["Todo"])
     assert_receive {:fetch_issues_by_states_called, ["Todo"]}
@@ -344,6 +361,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "retrying" => 1, "observed" => 0},
              "active_states" => ["Todo", "In Progress", "Agent Review"],
+             "parked_states" => ["Gated", "Human Review"],
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -942,7 +960,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_id: "issue-parked",
           identifier: "MT-PARKED",
           title: "Waiting on CI",
-          state: "Agent Review",
+          state: "Gated",
           url: nil,
           labels: ["gate:ci"],
           state_since: DateTime.utc_now(),
@@ -958,7 +976,12 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     {:ok, _view, html} = live(build_conn(), "/?issue=MT-PARKED")
 
-    assert html =~ "Handed off · 1"
+    # The lane is the tracker's own state, not a bucket named here: "Gated" and
+    # "Human Review" ask different people for different things.
+    assert html =~ ~s(lane-label-parked-stage-gated">Gated · 1</p>)
+    refute html =~ "Handed off · 1"
+    # And the header says what the tracker says, rather than "observed".
+    assert html =~ ~s(<span class="chip chip-muted">Gated</span>)
     assert html =~ "no session will start"
     assert html =~ "gate:ci"
     # The orchestrator never saw the transition, so the duration is a bound.
@@ -1175,6 +1198,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       ],
       active_states: ["Todo", "In Progress", "Agent Review"],
+      parked_states: ["Gated", "Human Review"],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }
@@ -1210,5 +1234,71 @@ defmodule SymphonyElixir.ExtensionsTest do
         {:error, {:already_started, _pid}} -> :ok
       end
     end
+  end
+
+  test "an issue that self parked after its session ended reports the state, not the session" do
+    orchestrator_name = Module.concat(__MODULE__, :SelfParkedOrchestrator)
+    now = DateTime.utc_now()
+
+    # The real shape of a self park: the agent hit a blocker, moved the issue to
+    # Gated, and its session ended right after. Both records exist at once.
+    snapshot =
+      static_snapshot()
+      |> Map.put(:running, [])
+      |> Map.put(:observed, [
+        %{
+          issue_id: "issue-parked",
+          identifier: "MT-PARKED",
+          title: "Needs a decision",
+          state: "Gated",
+          url: nil,
+          labels: ["gate:decision"],
+          state_since: DateTime.add(now, -600, :second),
+          state_since_exact?: true,
+          state_seconds: 600,
+          active_state?: false,
+          last_seen_at: now
+        }
+      ])
+      |> Map.put(:recent, [
+        %{
+          issue_id: "issue-parked",
+          identifier: "MT-PARKED",
+          title: "Needs a decision",
+          outcome: :completed,
+          reason: nil,
+          worker_host: nil,
+          session_id: "thread-parked",
+          turn_count: 1,
+          started_at: DateTime.add(now, -900, :second),
+          finished_at: DateTime.add(now, -600, :second),
+          runtime_seconds: 300,
+          tokens: %{input_tokens: 1, output_tokens: 1, total_tokens: 2},
+          diff_stats: nil,
+          plan: nil,
+          activity_trail: []
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/?issue=MT-PARKED")
+
+    # The session is over; the issue is not. Calling it "finished" hid the one
+    # queue that is waiting on a person.
+    assert html =~ ~s(<span class="chip chip-muted">Gated</span>)
+    refute html =~ "finished"
+    # And it belongs to its parked lane, not to recently finished.
+    assert html =~ "Gated · 1"
+    refute html =~ "Recently finished"
+    assert html =~ "gate:decision"
+
+    payload = Jason.decode!(response(get(build_conn(), "/api/v1/MT-PARKED"), 200))
+    assert payload["status"] == "observed"
+    assert payload["observed"]["state"] == "Gated"
+    # The finished session stays reachable -- it is the evidence for why the
+    # issue is parked -- it just does not get to name the issue's state.
+    assert payload["recent"]["outcome"] == "completed"
   end
 end

@@ -52,6 +52,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:owner, :string)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
+      # Watched but never dispatched. Empty by default: a tracker that has no
+      # parked states must not have work invented for it.
+      field(:parked_states, {:array, :string}, default: [])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
     end
 
@@ -60,7 +63,17 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :owner, :assignee, :active_states, :terminal_states],
+        [
+          :kind,
+          :endpoint,
+          :api_key,
+          :project_slug,
+          :owner,
+          :assignee,
+          :active_states,
+          :parked_states,
+          :terminal_states
+        ],
         empty_values: []
       )
     end
