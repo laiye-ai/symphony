@@ -638,8 +638,12 @@ Important nuance:
 - A successful worker exit does not mean the issue is done forever.
 - The worker MAY continue through multiple back-to-back coding-agent turns before it exits.
 - After each normal turn completion, the worker re-checks the tracker issue state.
-- If the issue is still in an active state, the worker SHOULD start another turn on the same live
-  coding-agent thread in the same workspace, up to `agent.max_turns`.
+- If the issue is still in the same active tracker state, the worker SHOULD start another turn on
+  the same live coding-agent thread in the same workspace, up to `agent.max_turns`.
+- If the issue changes from one active tracker state to another, the worker SHOULD end the current
+  session normally. The orchestrator's continuation retry redispatches the still-active issue with
+  a fresh coding-agent session, so workflow roles such as build, review, and rework do not inherit
+  one another's live thread history.
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
@@ -1867,9 +1871,13 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("issue state refresh error")
 
+    previous_state = issue.state
     issue = refreshed_issue[0] or issue
 
     if issue.state is not active:
+      break
+
+    if normalize(issue.state) != normalize(previous_state):
       break
 
     if turn_number >= max_turns:

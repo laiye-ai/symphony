@@ -235,6 +235,24 @@ defmodule SymphonyElixir.LinearRateLimitTest do
              AgentRunner.continue_with_issue_for_test?(issue, fetcher)
   end
 
+  test "continuation check keeps the live session only while the active state is unchanged" do
+    issue = LinearClientStub.issue()
+
+    same_state_fetcher = fn _ids ->
+      {:ok, [%{issue | state: " in progress "}]}
+    end
+
+    changed_state_fetcher = fn _ids ->
+      {:ok, [%{issue | state: "Todo"}]}
+    end
+
+    assert {:continue, %{state: " in progress "}} =
+             AgentRunner.continue_with_issue_for_test?(issue, same_state_fetcher)
+
+    assert {:state_changed, %{state: "Todo"}} =
+             AgentRunner.continue_with_issue_for_test?(issue, changed_state_fetcher)
+  end
+
   test "rate limited dispatch-time refresh keeps the retry chain alive and dispatch resumes" do
     issue = LinearClientStub.issue()
     LinearClientStub.set_recipient(self())
