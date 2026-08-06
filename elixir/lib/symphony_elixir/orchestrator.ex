@@ -453,9 +453,7 @@ defmodule SymphonyElixir.Orchestrator do
         refresh_running_issue_state(state, issue)
 
       true ->
-        Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
-
-        terminate_running_issue(state, issue.id, false)
+        drain_running_issue(state, issue)
     end
   end
 
@@ -498,11 +496,65 @@ defmodule SymphonyElixir.Orchestrator do
   defp refresh_running_issue_state(%State{} = state, %Issue{} = issue) do
     case Map.get(state.running, issue.id) do
       %{issue: _} = running_entry ->
-        %{state | running: Map.put(state.running, issue.id, %{running_entry | issue: issue})}
+        # An issue back in an active state is no longer parked, so any pending
+        # drain deadline must not fire against the now-legitimate run.
+        put_running_entry_issue(state, issue, Map.delete(running_entry, :drain_deadline_ms))
 
       _ ->
         state
     end
+  end
+
+  # A worker parks its own issue (onto a CI gate, review, ...) as the last
+  # action of a turn, so a non-active state usually shows up while that same
+  # worker is still wrapping up the turn that moved it. Stopping immediately
+  # races the worker's own shutdown: the run never reports completion, the
+  # session vanishes from accounting, and the after_run hook is skipped.
+  # Instead the run drains -- the worker's own post-turn state check ends it
+  # normally -- and the deadline is the stop-loss for issues parked externally
+  # while a turn refuses to finish.
+  defp drain_running_issue(%State{} = state, %Issue{} = issue) do
+    case Map.get(state.running, issue.id) do
+      nil ->
+        release_issue_claim(state, issue.id)
+
+      running_entry ->
+        timeout_ms = Config.settings!().agent.non_active_drain_timeout_ms
+
+        if is_integer(timeout_ms) and timeout_ms > 0 do
+          advance_issue_drain(state, issue, running_entry, timeout_ms)
+        else
+          Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+
+          terminate_running_issue(state, issue.id, false)
+        end
+    end
+  end
+
+  defp advance_issue_drain(%State{} = state, %Issue{} = issue, running_entry, timeout_ms) do
+    now_ms = System.monotonic_time(:millisecond)
+    session_id = running_entry_session_id(running_entry)
+
+    case Map.get(running_entry, :drain_deadline_ms) do
+      nil ->
+        Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state} session_id=#{session_id}; draining active agent for up to #{timeout_ms}ms")
+
+        put_running_entry_issue(state, issue, Map.put(running_entry, :drain_deadline_ms, now_ms + timeout_ms))
+
+      deadline_ms when is_integer(deadline_ms) and now_ms >= deadline_ms ->
+        Logger.warning("Drain deadline passed for non-active issue: #{issue_context(issue)} state=#{issue.state} session_id=#{session_id}; stopping active agent")
+
+        state
+        |> record_recent_session(issue.id, running_entry, :drain_timeout)
+        |> terminate_running_issue(issue.id, false)
+
+      _deadline_ms ->
+        put_running_entry_issue(state, issue, running_entry)
+    end
+  end
+
+  defp put_running_entry_issue(%State{} = state, %Issue{} = issue, running_entry) do
+    %{state | running: Map.put(state.running, issue.id, Map.put(running_entry, :issue, issue))}
   end
 
   defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do

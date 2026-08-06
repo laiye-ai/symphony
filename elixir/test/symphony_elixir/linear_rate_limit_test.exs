@@ -123,6 +123,16 @@ defmodule SymphonyElixir.LinearRateLimitTest do
     assert :ok = RateLimit.check()
   end
 
+  test "rate-limit pause without a usable duration falls back to the default pause" do
+    assert RateLimit.pause(nil) == RateLimit.default_pause_ms()
+    assert {:rate_limited, _remaining} = RateLimit.check()
+
+    RateLimit.clear()
+
+    assert RateLimit.pause(-1) == RateLimit.default_pause_ms()
+    assert {:rate_limited, _remaining} = RateLimit.check()
+  end
+
   test "RATELIMITED 400 response trips the global breaker and short-circuits later requests" do
     parent = self()
 

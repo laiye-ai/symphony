@@ -422,6 +422,13 @@ Fields:
 - `max_retry_backoff_ms` (integer)
   - Default: `300000` (5 minutes)
   - Changes SHOULD be re-applied at runtime and affect future retry scheduling.
+- `non_active_drain_timeout_ms` (integer)
+  - Default: `180000` (3 minutes)
+  - How long a running worker may keep finishing its current turn after its issue moves to a
+    non-active (non-terminal) state before it is force-stopped. Workers park their own issues as the
+    last action of a turn, so an immediate stop would race the worker's own shutdown and lose the
+    run's completion accounting.
+  - If `<= 0`, draining is disabled and the worker is stopped immediately.
 - `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
@@ -589,6 +596,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
+- `agent.non_active_drain_timeout_ms`: integer, default `180000` (3m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
@@ -796,8 +804,15 @@ Part B: Tracker state refresh
 - Fetch current issue states for all running issue IDs.
 - For each running issue:
   - If tracker state is terminal: terminate worker and clean workspace.
-  - If tracker state is still active: update the in-memory issue snapshot.
-  - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
+  - If tracker state is still active: update the in-memory issue snapshot and clear any pending
+    drain deadline.
+  - If tracker state is neither active nor terminal: mark the worker as draining and let the
+    current turn finish. Workers re-check the tracker state after each turn and exit normally when
+    the issue is no longer active, so a self-parked issue completes with full session accounting
+    (completion event, `after_run` hook, token totals). If the worker is still running once
+    `agent.non_active_drain_timeout_ms` elapses, terminate it without workspace cleanup and record
+    the session as failed with reason `drain_timeout`. If the timeout is `<= 0`, terminate
+    immediately (pre-drain behavior).
 - If state refresh fails, keep workers running and try again on the next tick.
 
 ### 8.6 Startup Terminal Workspace Cleanup

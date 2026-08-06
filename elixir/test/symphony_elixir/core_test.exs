@@ -241,7 +241,7 @@ defmodule SymphonyElixir.CoreTest do
     assert {:ok, []} = Client.fetch_issue_states_by_ids([])
   end
 
-  test "non-active issue state stops running agent without cleaning workspace" do
+  test "non-active issue state stops running agent immediately when draining is disabled" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -256,7 +256,8 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
         tracker_active_states: ["Todo", "In Progress", "In Review"],
-        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        non_active_drain_timeout_ms: 0
       )
 
       File.mkdir_p!(test_root)
@@ -302,6 +303,118 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "non-active issue state drains the running agent instead of stopping it mid-turn" do
+    issue_id = "issue-drain"
+    issue_identifier = "MT-559"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: issue_identifier,
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    parked_issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      state: "Backlog",
+      title: "Parked by its own worker",
+      description: "Turn is still wrapping up",
+      labels: []
+    }
+
+    drained_state = Orchestrator.reconcile_issue_states_for_test([parked_issue], state)
+    drained_entry = drained_state.running[issue_id]
+
+    assert Process.alive?(agent_pid)
+    assert MapSet.member?(drained_state.claimed, issue_id)
+    assert drained_entry.issue.state == "Backlog"
+    assert is_integer(drained_entry.drain_deadline_ms)
+
+    # A second sighting before the deadline keeps the agent draining.
+    redrained_state = Orchestrator.reconcile_issue_states_for_test([parked_issue], drained_state)
+
+    assert Process.alive?(agent_pid)
+    assert redrained_state.running[issue_id].drain_deadline_ms == drained_entry.drain_deadline_ms
+
+    # Returning to an active state cancels the drain entirely.
+    active_issue = %Issue{parked_issue | state: "In Progress"}
+    resumed_state = Orchestrator.reconcile_issue_states_for_test([active_issue], redrained_state)
+    resumed_entry = resumed_state.running[issue_id]
+
+    assert Process.alive?(agent_pid)
+    assert resumed_entry.issue.state == "In Progress"
+    refute Map.has_key?(resumed_entry, :drain_deadline_ms)
+
+    send(agent_pid, :stop)
+  end
+
+  test "drain deadline expiry stops the agent and records the session" do
+    issue_id = "issue-drain-timeout"
+    issue_identifier = "MT-560"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: issue_identifier,
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+          session_id: "session-drain-timeout",
+          started_at: DateTime.utc_now(),
+          drain_deadline_ms: System.monotonic_time(:millisecond) - 1
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    parked_issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      state: "Backlog",
+      title: "Parked externally",
+      description: "Turn never finished",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([parked_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+
+    assert [recent_entry] = updated_state.recent
+    assert recent_entry.issue_id == issue_id
+    assert recent_entry.identifier == issue_identifier
+    assert recent_entry.session_id == "session-drain-timeout"
+    assert recent_entry.outcome == :failed
+    assert recent_entry.reason == ":drain_timeout"
   end
 
   test "terminal issue state stops running agent and cleans workspace" do
