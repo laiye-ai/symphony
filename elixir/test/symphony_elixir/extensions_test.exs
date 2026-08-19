@@ -5,6 +5,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.LiveViewTest
 
   alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.PromptArchive
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -440,6 +441,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "recent" => nil,
              "observed" => nil,
              "logs" => %{"codex_session_logs" => []},
+             "prompts" => [],
              "recent_events" => [],
              "last_error" => nil,
              "tracked" => %{}
@@ -556,8 +558,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert source_css =~ ~r/\.shell \{[^}]*h-screen[^}]*overflow-hidden/s
     refute source_css =~ ~r/\.shell \{[^}]*min-h-screen/s
     # Text never sits on the saturated accent: white on it is 3.2:1, under the
-    # 4.5:1 floor. The selected row therefore fills with the container tint.
-    assert source_css =~ ~r/\.rail-row-selected,[^}]*background: var\(--color-primary-container\);/s
+    # 4.5:1 floor. The selected row therefore lifts to the plain surface and
+    # lets its text tokens carry the accent.
+    assert source_css =~ ~r/\.rail-row-selected,[^}]*background: var\(--color-surface\);/s
     assert source_css =~ ~r/@media \(prefers-color-scheme: dark\)[^}]*--color-on-primary-container:/s
     # The live row shares its kind with turn boundaries, so every rule that
     # hides boundary chrome must exclude it -- otherwise the current activity,
@@ -673,7 +676,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           activity: %{kind: :thinking, label: "Thinking", detail: nil, item_id: nil, since: now, soft: false},
           stdout_tail: "[symphony-owner-gate] ALLOW Issue MT-HTTP",
           activity_trail: [
-            %{at: now, kind: :failed, title: "node review-preflight.mjs", meta: "exit 2"},
+            %{at: now, kind: :command_failed, title: "node review-preflight.mjs", meta: "exit 2"},
             %{at: now, kind: :writing, title: "I will run the owner gate first, then read the review policy.", meta: nil},
             %{at: now, kind: :command, title: "git status --short", meta: "exit 0"},
             %{at: now, kind: :starting, title: "Session started", meta: nil}
@@ -687,7 +690,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
 
     refute html =~ "symphony-owner-gate"
-    assert html =~ ~s(class="trail-row trail-failed")
+    assert html =~ ~s(class="trail-row trail-command_failed")
     assert html =~ ~s(class="trail-row trail-writing")
     assert html =~ ~s(class="trail-row trail-command")
     assert html =~ ~s(class="trail-row trail-starting")
@@ -760,6 +763,132 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "is-expanded"
   end
 
+  test "an injected prompt opens from the timeline and reads section by section" do
+    orchestrator_name = Module.concat(__MODULE__, :PromptOrchestrator)
+    now = DateTime.utc_now()
+
+    archive_root = Path.join(System.tmp_dir!(), "symphony-prompt-live-#{System.unique_integer([:positive])}")
+    previous_log_file = Application.get_env(:symphony_elixir, :log_file)
+    Application.put_env(:symphony_elixir, :log_file, Path.join(archive_root, "log/symphony.log"))
+
+    on_exit(fn ->
+      if previous_log_file do
+        Application.put_env(:symphony_elixir, :log_file, previous_log_file)
+      else
+        Application.delete_env(:symphony_elixir, :log_file)
+      end
+
+      File.rm_rf(archive_root)
+    end)
+
+    description = "## Issue Facts\nGateway must not install channel dependencies.\n"
+
+    prompt = """
+    # Symphony Workflow
+
+    Description:
+
+    #{description}
+    ## Validation Policy
+    Run the narrowest proof that exercises the change.
+    """
+
+    issue = %Issue{
+      id: "issue-http",
+      identifier: "MT-HTTP",
+      title: "Prompt reader",
+      description: description,
+      state: "In Progress"
+    }
+
+    # Two turns from an earlier dispatch of the same issue: the index groups
+    # them into their own run and folds them behind a count by default.
+    {:ok, _earlier_turn_one} = PromptArchive.record(issue, 1, prompt, at: ~U[2026-07-31 07:00:00Z])
+    {:ok, _earlier_turn_two} = PromptArchive.record(issue, 2, prompt, at: ~U[2026-07-31 07:05:00Z])
+
+    {:ok, ref} = PromptArchive.record(issue, 1, prompt)
+
+    snapshot =
+      put_in(static_snapshot().running, [
+        %{
+          issue_id: "issue-http",
+          identifier: "MT-HTTP",
+          state: "In Progress",
+          session_id: "thread-http",
+          turn_count: 1,
+          last_codex_event: :notification,
+          last_codex_message: nil,
+          last_codex_timestamp: now,
+          codex_input_tokens: 1,
+          codex_output_tokens: 1,
+          codex_total_tokens: 2,
+          started_at: now,
+          last_progress_at: now,
+          activity: %{kind: :thinking, label: "Thinking", detail: nil, item_id: nil, since: now, soft: false},
+          stdout_tail: "",
+          activity_trail: [
+            %{
+              at: now,
+              kind: :prompt,
+              title: "Turn 1 prompt injected",
+              meta: nil,
+              prompt: %{identifier: ref.identifier, basename: ref.basename, turn: 1, chars: ref.chars}
+            }
+          ]
+        }
+      ])
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/")
+
+    # The timeline carries the reference only; the prompt body stays on disk.
+    # The entry renders as a turn divider, and the archive index lists the
+    # same prompt as a chip that does not depend on the trail at all.
+    assert html =~ ~s(class="trail-row trail-prompt")
+    assert html =~ "turn 1 prompt"
+    assert html =~ ~s(class="prompt-chip mono")
+    refute html =~ "Run the narrowest proof"
+
+    # Only the latest run's chips show; the earlier dispatch sits behind a
+    # count until asked for, and folds back on a second click. Matched on the
+    # chip element, not the page text: LiveView's session tokens are base64
+    # and can contain any two-character substring.
+    assert html =~ "1 earlier run"
+    refute has_element?(view, "button.prompt-chip", "T2")
+
+    view |> element("button.prompt-index-toggle") |> render_click()
+
+    assert has_element?(view, "button.prompt-chip", "T2")
+    assert has_element?(view, "button.prompt-index-toggle", "hide earlier")
+
+    view |> element("button.prompt-index-toggle") |> render_click()
+
+    refute has_element?(view, "button.prompt-chip", "T2")
+
+    html = view |> element("button.trail-turn-divider") |> render_click()
+
+    # Sections are split and attributed, and the opening view is the header.
+    assert html =~ "prompt-outline"
+    assert html =~ "Issue Facts"
+    assert html =~ "Validation Policy"
+    assert html =~ "tracker text"
+    assert html =~ "workflow template"
+    assert html =~ "Symphony Workflow"
+
+    html = view |> element(~s(button[phx-value-index="2"])) |> render_click()
+
+    assert html =~ "Run the narrowest proof that exercises the change."
+    assert html =~ "prompt-tag"
+
+    html = view |> element("button.prompt-back") |> render_click()
+
+    # Back on the timeline, and the prompt body is gone from the page again.
+    assert html =~ ~s(class="trail-row trail-prompt")
+    refute html =~ "Run the narrowest proof"
+  end
+
   test "live sessions are grouped by tracker stage in the configured order" do
     orchestrator_name = Module.concat(__MODULE__, :StageOrchestrator)
     now = DateTime.utc_now()
@@ -823,7 +952,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         %{at: now, kind: :command, title: "git status --short", meta: "exit 0"},
         %{at: now, kind: :command, title: "rg privacy src/", meta: "exit 0"},
         # A failure breaks the run: it is the thing you came to find.
-        %{at: now, kind: :failed, title: "mix dialyzer", meta: "exit 2"},
+        %{at: now, kind: :command_failed, title: "mix dialyzer", meta: "exit 2"},
         %{at: now, kind: :command, title: "git log --oneline", meta: "exit 0"},
         %{at: now, kind: :command, title: "git diff --stat", meta: "exit 0"}
       ]
@@ -870,6 +999,19 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert html =~ "rg privacy src/"
     assert html =~ "linear_graphql"
+
+    # The narrative view keeps the words and drops the tooling -- including a
+    # command that merely exited non-zero, which is noise, not story.
+    html = view |> element(~s(button[phx-value-filter="narrative"])) |> render_click()
+
+    assert html =~ "Preflight is green"
+    refute html =~ "mix dialyzer"
+    refute html =~ "gh pr view 218"
+    refute html =~ "4 steps"
+
+    html = view |> element(~s(button[phx-value-filter="all"])) |> render_click()
+
+    assert html =~ "mix dialyzer"
   end
 
   test "an issue with both a live session and a finished one is listed once" do

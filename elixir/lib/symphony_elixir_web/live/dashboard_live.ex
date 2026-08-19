@@ -10,6 +10,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  require Logger
+
+  alias SymphonyElixir.PromptArchive
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
 
   @runtime_tick_ms 1_000
@@ -21,6 +24,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # Two in a row are cheaper to read than to unfold; three is where a run starts
   # costing more than the click.
   @group_min_run 3
+  # What the narrative view keeps: the agent's own words, the prompts it was
+  # given, and anything that stopped it. `:failed` here means the turn went
+  # down; a command that exited non-zero is `:command_failed` and stays out --
+  # a grep with no matches exits 1 as part of ordinary work.
+  @narrative_filter_kinds [:writing, :prompt, :awaiting_approval, :awaiting_input, :failed]
   # A session that has emitted nothing for this long has stopped making
   # progress, whatever its last event claimed it was doing.
   @stalled_after_seconds 300
@@ -33,12 +41,27 @@ defmodule SymphonyElixirWeb.DashboardLive do
       schedule_runtime_tick()
     end
 
-    {:ok, assign(socket, selected: nil, lanes: [], expanded: MapSet.new(), now: DateTime.utc_now())}
+    {:ok,
+     assign(socket,
+       selected: nil,
+       lanes: [],
+       expanded: MapSet.new(),
+       prompt_view: nil,
+       prompt_section: 0,
+       trail_filter: :all,
+       prompt_index_expanded: false,
+       now: DateTime.utc_now()
+     )}
   end
 
   @impl true
   def handle_params(params, _uri, socket) do
-    {:noreply, socket |> assign(:selected, params["issue"]) |> refresh()}
+    {:noreply,
+     socket
+     |> assign(:selected, params["issue"])
+     |> assign(:prompt_index_expanded, false)
+     |> close_prompt_view()
+     |> refresh()}
   end
 
   @impl true
@@ -68,6 +91,40 @@ defmodule SymphonyElixirWeb.DashboardLive do
       end
 
     {:noreply, assign(socket, :expanded, toggled)}
+  end
+
+  def handle_event("open_prompt", %{"identifier" => identifier, "basename" => basename}, socket) do
+    case PromptArchive.read(identifier, basename) do
+      {:ok, record} ->
+        {:noreply, assign(socket, prompt_view: record, prompt_section: 0)}
+
+      {:error, reason} ->
+        Logger.warning("Unable to open archived prompt #{identifier}/#{basename}: #{inspect(reason)}")
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("close_prompt", _params, socket) do
+    {:noreply, close_prompt_view(socket)}
+  end
+
+  def handle_event("toggle_prompt_index", _params, socket) do
+    {:noreply, assign(socket, :prompt_index_expanded, not socket.assigns.prompt_index_expanded)}
+  end
+
+  def handle_event("set_trail_filter", %{"filter" => "narrative"}, socket) do
+    {:noreply, assign(socket, :trail_filter, :narrative)}
+  end
+
+  def handle_event("set_trail_filter", _params, socket) do
+    {:noreply, assign(socket, :trail_filter, :all)}
+  end
+
+  def handle_event("select_prompt_section", %{"index" => index}, socket) do
+    case Integer.parse(index) do
+      {parsed, ""} -> {:noreply, assign(socket, :prompt_section, clamp_section(socket.assigns.prompt_view, parsed))}
+      _ -> {:noreply, socket}
+    end
   end
 
   defp refresh(socket) do
@@ -167,10 +224,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </nav>
 
           <section class="detail">
-            <%= if @payload.detail do %>
-              <.detail detail={@payload.detail} now={@now} expanded={@expanded} />
-            <% else %>
-              <p class="empty-state">No issues are being tracked right now.</p>
+            <%= cond do %>
+              <% @prompt_view -> %>
+                <.prompt_reader view={@prompt_view} selected={@prompt_section} />
+              <% @payload.detail -> %>
+                <.detail
+                  detail={@payload.detail}
+                  now={@now}
+                  expanded={@expanded}
+                  trail_filter={@trail_filter}
+                  prompt_index_expanded={@prompt_index_expanded}
+                />
+              <% true -> %>
+                <p class="empty-state">No issues are being tracked right now.</p>
             <% end %>
           </section>
         </div>
@@ -189,6 +255,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </div>
       <p :if={detail_title(@detail)} class="detail-title"><%= detail_title(@detail) %></p>
     </header>
+
+    <.prompt_index
+      :if={Map.get(@detail, :prompts, []) != []}
+      prompts={@detail.prompts}
+      expanded={@prompt_index_expanded}
+    />
 
     <%= if @detail.running do %>
       <section class="metrics mono">
@@ -219,7 +291,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </section>
 
       <section class="detail-block detail-timeline">
-        <p class="block-label">Timeline</p>
+        <div class="block-head">
+          <p class="block-label">Timeline</p>
+          <.trail_filter_toggle filter={@trail_filter} />
+        </div>
         <ol class="trail">
           <li class={"trail-row trail-open trail-#{activity_kind(@detail.running)}"}>
             <span class="trail-time mono">now</span>
@@ -238,10 +313,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </div>
           </li>
 
-          <.trail_rows entries={@detail.running.activity_trail} expanded={@expanded} />
+          <.trail_rows entries={@detail.running.activity_trail} expanded={@expanded} filter={@trail_filter} />
         </ol>
         <p class="block-footnote">
-          Last <%= length(@detail.running.activity_trail) %> events · scroll for history
+          Last <%= length(@detail.running.activity_trail) %> events · older tool steps age out before messages and prompts
         </p>
       </section>
     <% end %>
@@ -259,12 +334,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     <%= if @detail.recent do %>
       <section class={history_block_class(@detail)}>
-        <p class="block-label">
-          Last session · ended <%= format_ago(@detail.recent.finished_at, @now) %>
-        </p>
+        <div class="block-head">
+          <p class="block-label">
+            Last session · ended <%= format_ago(@detail.recent.finished_at, @now) %>
+          </p>
+          <.trail_filter_toggle :if={show_recent_trail?(@detail)} filter={@trail_filter} />
+        </div>
         <p :if={@detail.recent.reason} class="muted mono"><%= @detail.recent.reason %></p>
         <ol :if={show_recent_trail?(@detail)} class="trail">
-          <.trail_rows entries={@detail.recent.activity_trail} expanded={@expanded} />
+          <.trail_rows entries={@detail.recent.activity_trail} expanded={@expanded} filter={@trail_filter} />
         </ol>
         <footer class="detail-foot mono muted">
           <span><%= format_seconds(@detail.recent.runtime_seconds) %> · <%= @detail.recent.turn_count %> turns</span>
@@ -284,8 +362,33 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
+  defp trail_filter_toggle(assigns) do
+    ~H"""
+    <div class="trail-filter" role="group" aria-label="Timeline filter">
+      <button type="button" class={trail_filter_class(@filter, :all)} phx-click="set_trail_filter" phx-value-filter="all">
+        all
+      </button>
+      <button
+        type="button"
+        class={trail_filter_class(@filter, :narrative)}
+        phx-click="set_trail_filter"
+        phx-value-filter="narrative"
+      >
+        narrative
+      </button>
+    </div>
+    """
+  end
+
+  defp trail_filter_class(current, value) do
+    "trail-filter-option#{if current == value, do: " is-active", else: ""}"
+  end
+
+  defp filter_trail(entries, :narrative), do: Enum.filter(entries, &(&1.kind in @narrative_filter_kinds))
+  defp filter_trail(entries, _filter), do: entries
+
   defp trail_rows(assigns) do
-    assigns = assign(assigns, :items, group_trail(assigns.entries))
+    assigns = assign(assigns, :items, assigns.entries |> filter_trail(assigns.filter) |> group_trail())
 
     ~H"""
     <%= for item <- @items do %>
@@ -324,6 +427,33 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
+  # A prompt is where a turn begins, so it renders as the boundary it is -- a
+  # divider that slices the trail into turns -- rather than as one more card
+  # competing with the events it introduced. The whole divider opens the
+  # archived prompt.
+  defp trail_entry(%{entry: %{kind: :prompt, prompt: %{identifier: identifier}}} = assigns)
+       when is_binary(identifier) do
+    ~H"""
+    <li class="trail-row trail-prompt">
+      <span class="trail-time mono"><%= format_clock(@entry.at) %></span>
+      <span class="trail-rail" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="trail-turn-divider"
+        phx-click="open_prompt"
+        phx-value-identifier={@entry.prompt.identifier}
+        phx-value-basename={@entry.prompt.basename}
+      >
+        <span class="trail-turn-label mono">
+          turn <%= @entry.prompt.turn %> prompt · <%= format_int(@entry.prompt.chars) %> chars
+        </span>
+        <span class="trail-turn-rule" aria-hidden="true"></span>
+        <span class="trail-turn-view">view</span>
+      </button>
+    </li>
+    """
+  end
+
   defp trail_entry(assigns) do
     ~H"""
     <li class={"trail-row trail-#{@entry.kind}"}>
@@ -356,6 +486,78 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </button>
       </div>
     </li>
+    """
+  end
+
+  # The reader replaces the detail pane rather than floating over it: the prompt
+  # is long enough that reading it beside a live timeline means reading neither.
+  defp prompt_reader(assigns) do
+    assigns =
+      assign(assigns,
+        rows: outline_rows(assigns.view.sections),
+        section: Enum.at(assigns.view.sections, assigns.selected)
+      )
+
+    ~H"""
+    <header class="prompt-head">
+      <button type="button" class="prompt-back" phx-click="close_prompt" aria-label="Back to timeline">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+          <path d="M9.5 4 5.5 8l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <span class="detail-id"><%= @view.identifier %></span>
+      <span class="chip">turn <%= @view.turn %> prompt</span>
+      <span class="prompt-head-meta mono">
+        <%= format_int(@view.chars) %> chars<%= if @view.issue_state, do: " · #{@view.issue_state}" %>
+      </span>
+    </header>
+
+    <section class="prompt-origins">
+      <span class="prompt-origin-key">
+        <span class="prompt-dot prompt-dot-issue" aria-hidden="true"></span>
+        tracker text <span class="mono"><%= format_int(@view.issue_chars) %></span>
+      </span>
+      <span class="prompt-origin-key">
+        <span class="prompt-dot prompt-dot-template" aria-hidden="true"></span>
+        workflow template <span class="mono"><%= format_int(@view.template_chars) %></span>
+      </span>
+      <span class="prompt-ratio" aria-hidden="true">
+        <span class="prompt-ratio-issue" style={"width: #{percent_of(@view.issue_chars, @view.chars)}%"}></span>
+      </span>
+    </section>
+
+    <div class="prompt-split">
+      <nav class="prompt-outline">
+        <%= for row <- @rows do %>
+          <%= case row do %>
+            <% {:label, origin} -> %>
+              <p class="prompt-outline-group"><%= origin_label(origin) %></p>
+            <% {:row, index, entry} -> %>
+              <button
+                type="button"
+                class={"prompt-outline-row#{if index == @selected, do: " is-selected", else: ""}"}
+                phx-click="select_prompt_section"
+                phx-value-index={index}
+              >
+                <span class={"prompt-dot prompt-dot-#{entry.origin}"} aria-hidden="true"></span>
+                <span class="prompt-outline-title"><%= entry.title %></span>
+                <span class="prompt-outline-chars mono"><%= format_int(entry.chars) %></span>
+              </button>
+          <% end %>
+        <% end %>
+      </nav>
+
+      <article :if={@section} class="prompt-section">
+        <p class="prompt-section-head">
+          <span class="prompt-section-title"><%= @section.title %></span>
+          <span class={"prompt-tag prompt-tag-#{@section.origin}"}><%= origin_label(@section.origin) %></span>
+        </p>
+        <p class="prompt-section-meta mono">
+          <%= format_int(@section.chars) %> chars · <%= percent_of(@section.chars, @view.chars) %>% of this turn
+        </p>
+        <pre class="prompt-body mono"><%= @section.body %></pre>
+      </article>
+    </div>
     """
   end
 
@@ -578,8 +780,109 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp expanded?(expanded, entry), do: MapSet.member?(expanded, trail_key(entry))
 
+  defp close_prompt_view(socket), do: assign(socket, prompt_view: nil, prompt_section: 0)
+
+  defp clamp_section(%{sections: sections}, index) when is_list(sections) do
+    index |> max(0) |> min(max(length(sections) - 1, 0))
+  end
+
+  defp clamp_section(_view, _index), do: 0
+
+  # Sections keep document order so the outline reads like the prompt does; the
+  # origin label is inserted wherever ownership changes hands instead.
+  defp outline_rows(sections) do
+    sections
+    |> Enum.with_index()
+    |> Enum.reduce({nil, []}, fn {section, index}, {previous_origin, acc} ->
+      acc =
+        if section.origin == previous_origin,
+          do: acc,
+          else: [{:label, section.origin} | acc]
+
+      {section.origin, [{:row, index, section} | acc]}
+    end)
+    |> elem(1)
+    |> Enum.reverse()
+  end
+
+  # The archive spans every session an issue has had, and each session numbers
+  # its turns from 1, so a much-redispatched issue reads as a wall of "T1"s.
+  # Chips are grouped into runs -- a turn number that fails to increase starts
+  # a new run -- and only the latest run shows by default, with the rest
+  # behind a count. Each run is timestamped so ten runs of "T1" read as ten
+  # dispatches rather than one broken counter.
+  defp prompt_index(assigns) do
+    runs = prompt_runs(assigns.prompts)
+
+    assigns =
+      assign(assigns,
+        runs: if(assigns.expanded, do: runs, else: Enum.take(runs, -1)),
+        earlier: length(runs) - 1
+      )
+
+    ~H"""
+    <section class="prompt-index">
+      <span class="prompt-index-label">prompts</span>
+      <button
+        :if={@earlier > 0}
+        type="button"
+        class="prompt-index-toggle"
+        aria-expanded={to_string(@expanded)}
+        phx-click="toggle_prompt_index"
+      >
+        <%= if @expanded, do: "hide earlier", else: "#{@earlier} earlier #{if @earlier == 1, do: "run", else: "runs"}" %>
+      </button>
+      <span :for={run <- @runs} class="prompt-run">
+        <span class="prompt-run-time mono"><%= format_clock(List.first(run).at) %></span>
+        <button
+          :for={ref <- run}
+          type="button"
+          class="prompt-chip mono"
+          phx-click="open_prompt"
+          phx-value-identifier={ref.identifier}
+          phx-value-basename={ref.basename}
+          title={prompt_chip_title(ref)}
+        >
+          <%= prompt_chip_label(ref) %>
+        </button>
+      </span>
+    </section>
+    """
+  end
+
+  defp prompt_runs(prompts) do
+    prompts
+    |> Enum.reduce([], fn
+      %{turn: turn} = ref, [[%{turn: previous_turn} | _rest_of_run] = run | earlier_runs]
+      when is_integer(previous_turn) and is_integer(turn) and turn > previous_turn ->
+        [[ref | run] | earlier_runs]
+
+      ref, runs ->
+        [[ref] | runs]
+    end)
+    |> Enum.map(&Enum.reverse/1)
+    |> Enum.reverse()
+  end
+
+  defp prompt_chip_label(%{turn: turn}) when is_integer(turn), do: "T#{turn}"
+  defp prompt_chip_label(_ref), do: "?"
+
+  defp prompt_chip_title(%{at: at}) when is_binary(at), do: at
+  defp prompt_chip_title(%{basename: basename}), do: basename
+
+  defp origin_label(:issue), do: "tracker text"
+  defp origin_label(:template), do: "workflow template"
+  defp origin_label(_origin), do: "origin unknown"
+
+  defp percent_of(_part, total) when not is_integer(total) or total <= 0, do: 0
+
+  defp percent_of(part, total) when is_integer(part), do: Float.round(part * 100 / total, 1)
+
+  defp percent_of(_part, _total), do: 0
+
   defp trail_kind_label(:command), do: "command"
   defp trail_kind_label(:failed), do: "failed"
+  defp trail_kind_label(:command_failed), do: "failed"
   defp trail_kind_label(:edit), do: "file change"
   defp trail_kind_label(:writing), do: "agent message"
   defp trail_kind_label(:tool), do: "tool"

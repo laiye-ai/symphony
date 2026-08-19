@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, Orchestrator, PromptArchive, StatusDashboard}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -128,6 +128,10 @@ defmodule SymphonyElixirWeb.Presenter do
       logs: %{
         codex_session_logs: []
       },
+      # From the archive directory, not from orchestrator state: the index
+      # outlives both trail eviction and restarts, and every status gets it --
+      # a finished or parked issue still has readable prompt history.
+      prompts: prompts_payload(issue_identifier),
       recent_events: (running && recent_events_payload(running)) || [],
       last_error: retry && retry.error,
       tracked: %{}
@@ -261,12 +265,38 @@ defmodule SymphonyElixirWeb.Presenter do
         at: iso8601(Map.get(entry, :at)),
         kind: Map.get(entry, :kind),
         title: Map.get(entry, :title),
-        meta: Map.get(entry, :meta)
+        meta: Map.get(entry, :meta),
+        prompt: prompt_payload(Map.get(entry, :prompt))
       }
     end)
   end
 
   defp trail_payload(_trail), do: []
+
+  defp prompt_payload(%{identifier: identifier, basename: basename} = prompt)
+       when is_binary(identifier) and is_binary(basename) do
+    %{
+      identifier: identifier,
+      basename: basename,
+      turn: Map.get(prompt, :turn),
+      chars: Map.get(prompt, :chars)
+    }
+  end
+
+  defp prompt_payload(_prompt), do: nil
+
+  defp prompts_payload(issue_identifier) do
+    issue_identifier
+    |> PromptArchive.list()
+    |> Enum.map(fn entry ->
+      %{
+        identifier: entry.identifier,
+        basename: entry.basename,
+        turn: entry.turn,
+        at: iso8601(entry.at)
+      }
+    end)
+  end
 
   defp retry_entry_payload(entry) do
     %{

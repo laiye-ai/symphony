@@ -165,6 +165,88 @@ defmodule SymphonyElixir.OrchestratorActivityTest do
     assert List.first(entry.activity_trail).title == "step 60"
   end
 
+  test "messages and prompts outlive a flood of tool steps" do
+    pid = start_orchestrator(:TrailClasses)
+    started_at = ~U[2026-07-31 08:00:00Z]
+    inject_running(pid, "issue-classes", started_at)
+
+    send(
+      pid,
+      {:codex_worker_update, "issue-classes",
+       notification(
+         "item/completed",
+         %{"item" => %{"id" => "msg-1", "type" => "agentMessage", "text" => "found the root cause"}},
+         started_at
+       )}
+    )
+
+    send(
+      pid,
+      {:turn_prompt_archived, "issue-classes",
+       %{
+         identifier: "MT-ACT",
+         basename: "20260731T080000Z-turn1.json",
+         path: "/tmp/prompts/MT-ACT/20260731T080000Z-turn1.json",
+         turn: 1,
+         chars: 100,
+         at: started_at
+       }}
+    )
+
+    Enum.each(1..80, fn index ->
+      send(
+        pid,
+        {:codex_worker_update, "issue-classes",
+         notification(
+           "item/completed",
+           %{"item" => %{"id" => "exec-#{index}", "type" => "commandExecution", "command" => "step #{index}"}},
+           started_at
+         )}
+      )
+    end)
+
+    entry = running_entry(pid)
+    kinds = Enum.frequencies_by(entry.activity_trail, & &1.kind)
+
+    # Under one shared cap, 80 commands would have pushed both off the end.
+    # Each class holds its own budget, so the narrative survives at the tail
+    # while the command window stays bounded.
+    assert kinds[:command] == 50
+    assert kinds[:writing] == 1
+    assert kinds[:prompt] == 1
+    assert List.last(entry.activity_trail).title == "found the root cause"
+  end
+
+  test "an archived turn prompt lands on the trail as a reference, not as text" do
+    pid = start_orchestrator(:PromptTrail)
+    started_at = ~U[2026-07-31 08:00:00Z]
+    inject_running(pid, "issue-prompt", started_at)
+
+    send(
+      pid,
+      {:turn_prompt_archived, "issue-prompt",
+       %{
+         identifier: "MT-ACT",
+         basename: "20260731T080000Z-turn1.json",
+         path: "/tmp/prompts/MT-ACT/20260731T080000Z-turn1.json",
+         turn: 1,
+         chars: 41_093,
+         at: started_at
+       }}
+    )
+
+    entry = running_entry(pid)
+    [trail | _rest] = entry.activity_trail
+
+    assert trail.kind == :prompt
+    assert trail.title == "Turn 1 prompt injected"
+    assert trail.prompt.basename == "20260731T080000Z-turn1.json"
+    assert trail.prompt.chars == 41_093
+    refute Map.has_key?(trail.prompt, :prompt)
+    # The activity itself is untouched: archiving is bookkeeping, not progress.
+    assert entry.activity == Activity.initial(started_at)
+  end
+
   test "captured command output is bounded and stays valid utf-8" do
     pid = start_orchestrator(:Stdout)
     started_at = ~U[2026-07-31 08:00:00Z]

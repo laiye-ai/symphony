@@ -70,6 +70,21 @@
   --palette-teal-800: #2b6d5a;
   --palette-teal-900: #123a2f;
   --palette-teal-950: #0e2a23;
+
+  /* Two steps of real elevation. `card` is the resting lift for closed events;
+     `raised` is reserved for what is alive or speaking -- the open activity,
+     agent messages, the selected rail row -- so depth encodes attention, not
+     decoration. */
+  --shadow-card: 0 1px 2px rgb(24 24 27 / 0.06), 0 1px 1px rgb(24 24 27 / 0.04);
+  --shadow-raised: 0 1px 3px rgb(24 24 27 / 0.08), 0 3px 10px rgb(24 24 27 / 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Charcoal surfaces swallow low-alpha shadows; dark depth needs more ink. */
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-raised: 0 2px 4px rgb(0 0 0 / 0.45), 0 4px 14px rgb(0 0 0 / 0.35);
+  }
 }
 
 @theme {
@@ -112,8 +127,8 @@
   --text-shell-title: 18px;
   --text-emphasis: 20px;
 
-  --radius-card: 6px;
-  --radius-chip: 4px;
+  --radius-card: 8px;
+  --radius-chip: 5px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -219,13 +234,21 @@
 
   /* Replaces the hero, four metric cards, and rate-limit panel that together
      took most of the viewport without answering an operational question. */
+  /* The bar floats above the panes: a real (if faint) shadow instead of a
+     hairline, so the chrome and the content read as different planes. */
   .topbar {
-    @apply flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2;
-    border-bottom: 1px solid var(--color-outline);
+    @apply relative z-10 flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 bg-surface;
+    box-shadow: var(--shadow-card);
   }
 
   .topbar-brand {
-    @apply font-medium text-on-primary-container;
+    @apply flex items-center gap-2 font-medium text-on-primary-container;
+  }
+
+  .topbar-brand::before {
+    content: "";
+    @apply size-2 rounded-full;
+    background: var(--color-primary);
   }
 
   .dot-label {
@@ -261,8 +284,13 @@
     grid-template-columns: 208px minmax(0, 1fr);
   }
 
+  /* Both panes sit on the recessed canvas -- `background` is below `surface`
+     in light mode and above it in dark, so cards keep the right elevation
+     direction in both -- and everything that matters floats on it as a card.
+     Sections separate by whitespace and grouping, not by full-bleed rules. */
   .rail {
     @apply overflow-y-auto py-1.5;
+    background: var(--color-background);
     border-right: 1px solid var(--color-outline);
   }
 
@@ -282,12 +310,15 @@
   }
 
   .rail-row:hover {
-    background: var(--color-surface-container-low);
+    background: var(--color-surface-container);
   }
 
+  /* Selection lifts the row off the recessed plane instead of tinting it:
+     a raised white card reads as "picked up". */
   .rail-row-selected,
   .rail-row-selected:hover {
-    background: var(--color-primary-container);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
   }
 
   .rail-body {
@@ -331,12 +362,12 @@
      dead space, and the links sit at the bottom edge as a footer rather than
      floating directly under the content. */
   .detail {
-    @apply flex min-h-0 min-w-0 flex-col;
+    @apply flex min-h-0 min-w-0 flex-col gap-2.5 pt-3;
+    background: var(--color-background);
   }
 
   .detail-head {
-    @apply shrink-0 px-4 py-2.5;
-    border-bottom: 1px solid var(--color-outline);
+    @apply shrink-0 px-4;
   }
 
   .detail-head-row {
@@ -352,7 +383,7 @@
   }
 
   .chip {
-    @apply rounded-chip px-2 py-0.5 text-caption text-secondary;
+    @apply rounded-full px-2 py-0.5 text-caption text-secondary;
     border: 1px solid var(--color-control-outline);
   }
 
@@ -371,23 +402,33 @@
     border-color: var(--color-error-outline);
   }
 
+  /* A block is a floating card on the canvas by default; the timeline opts
+     back out below because its events are cards themselves. */
   .detail-block {
-    @apply shrink-0 px-4 py-3;
-    border-bottom: 1px solid var(--color-outline);
+    @apply mx-4 shrink-0 rounded-card px-3 py-2.5;
+    border: 1px solid var(--color-outline);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
   }
 
   /* Must come after .detail-block: the timeline is one, and it is the block that
      takes the slack. Ordered the other way, .detail-block's shrink-0 wins over
      flex-1's shrink and the section is pinned at its flex-basis of 0 -- grow
-     only hands out space that is left over, so a tall sibling collapses it. */
+     only hands out space that is left over, so a tall sibling collapses it.
+     It also sheds the card chrome: its rows are cards already, and a card of
+     cards would put a frame around the whole scroll area. */
   .detail-timeline {
-    @apply flex min-h-0 flex-1 shrink flex-col;
+    @apply mx-0 flex min-h-0 flex-1 shrink flex-col rounded-none border-0 px-4;
+    background: transparent;
+    box-shadow: none;
   }
 
   .metrics {
-    @apply flex flex-wrap gap-x-5 px-4 py-2.5;
+    @apply mx-4 flex shrink-0 flex-wrap gap-x-5 rounded-card px-3 py-2;
     color: var(--color-on-surface-faint);
-    border-bottom: 1px solid var(--color-outline);
+    border: 1px solid var(--color-outline);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
   }
 
   .metrics b {
@@ -437,12 +478,12 @@
   }
 
   .progress {
-    @apply block h-[3px] flex-1 overflow-hidden rounded-sm;
-    background: var(--color-surface-container);
+    @apply block h-1 flex-1 overflow-hidden rounded-full;
+    background: var(--color-surface-container-high);
   }
 
   .progress-fill {
-    @apply block h-full rounded-sm bg-primary;
+    @apply block h-full rounded-full bg-primary;
   }
 
   .plan-step {
@@ -483,24 +524,31 @@
     @apply flex gap-2.5 text-label;
   }
 
+  /* Right-aligned against the rail so the clock and its station read as one
+     unit rather than the time floating at the far edge. */
   .trail-time {
-    @apply w-[50px] shrink-0 pt-2.5 text-caption;
+    @apply w-[50px] shrink-0 pt-2.5 text-right text-caption;
     color: var(--color-on-surface-faint);
   }
 
+  /* The gutter is a line of stations: every dot is a ring filled with the
+     canvas colour so it sits ON the line instead of being crossed by it, and
+     the ring's border carries the event's meaning. Everything is centred on
+     the same 5.5px axis. */
   .trail-rail {
-    @apply relative w-[9px] shrink-0;
+    @apply relative w-[11px] shrink-0;
   }
 
   .trail-rail::before {
     content: "";
-    @apply absolute top-[11px] left-0.5 size-[5px] rounded-full;
-    background: var(--color-on-surface-faint);
+    @apply absolute top-[13px] left-[2px] size-[7px] rounded-full;
+    background: var(--color-background);
+    border: 1.5px solid var(--color-control-outline);
   }
 
   .trail-rail::after {
     content: "";
-    @apply absolute top-[-8px] bottom-0 left-1 w-px;
+    @apply absolute top-[-8px] bottom-0 left-[5px] w-px;
     background: var(--color-outline);
   }
 
@@ -508,10 +556,14 @@
     @apply bottom-auto h-[18px];
   }
 
+  /* Closed events are raised cards, not tinted recesses: the surface colour
+     plus a resting shadow is what separates "a thing that happened" from the
+     pane behind it. */
   .trail-card {
     @apply mb-2 min-w-0 flex-1 rounded-card px-3 py-2;
     border: 1px solid var(--color-outline);
-    background: var(--color-surface-container-low);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
   }
 
   .trail-head {
@@ -533,18 +585,19 @@
     @apply px-0 py-0;
     border: 0;
     background: transparent;
+    box-shadow: none;
   }
 
   .trail-group-head {
-    @apply flex w-full cursor-pointer items-baseline gap-2 rounded-card border-0 px-2 py-1 text-left text-caption;
-    background: var(--color-surface-container-low);
+    @apply flex w-full cursor-pointer items-baseline gap-2 rounded-full border-0 px-3 py-1 text-left text-caption;
+    background: var(--color-surface-container);
     color: var(--color-on-surface-faint);
     outline: none;
   }
 
   .trail-group-head:hover,
   .trail-group-head:focus-visible {
-    background: var(--color-surface-container);
+    background: var(--color-surface-container-high);
   }
 
   .trail-group-head .trail-kind {
@@ -593,14 +646,16 @@
   /* Only the kinds worth interrupting for get a chip; commands are the bulk of
      the stream and stay plain text so the chips keep meaning something. */
   .trail-failed .trail-kind,
+  .trail-command_failed .trail-kind,
   .trail-writing .trail-kind,
   .trail-awaiting_approval .trail-kind,
   .trail-awaiting_input .trail-kind {
-    @apply rounded-chip px-1.5 py-px;
+    @apply rounded-full px-2 py-px;
     border: 1px solid var(--color-control-outline);
   }
 
-  .trail-failed .trail-kind {
+  .trail-failed .trail-kind,
+  .trail-command_failed .trail-kind {
     @apply bg-error-container;
     border-color: var(--color-error-outline);
   }
@@ -617,10 +672,12 @@
   }
 
   /* Agent messages are the densest signal in the stream, so they get body
-     treatment, a raised surface, and room to wrap instead of being clipped. */
+     treatment, the higher elevation, and room to wrap instead of being
+     clipped. */
   .trail-writing .trail-card {
     background: var(--color-surface);
     border-color: var(--color-control-outline);
+    box-shadow: var(--shadow-raised);
   }
 
   .trail-writing .trail-body {
@@ -665,18 +722,27 @@
     transform: rotate(180deg);
   }
 
-  .trail-failed .trail-card {
+  .trail-failed .trail-card,
+  .trail-command_failed .trail-card {
     @apply bg-error-container;
     border-color: var(--color-error-outline);
   }
 
   .trail-failed .trail-head,
-  .trail-failed .trail-body {
+  .trail-failed .trail-body,
+  .trail-command_failed .trail-head,
+  .trail-command_failed .trail-body {
     @apply font-mono text-error;
   }
 
-  .trail-failed .trail-rail::before {
-    background: var(--color-error);
+  .trail-failed .trail-rail::before,
+  .trail-command_failed .trail-rail::before {
+    border-color: var(--color-error);
+  }
+
+  /* A prompt is where a turn begins, so its station carries the accent. */
+  .trail-prompt .trail-rail::before {
+    border-color: var(--color-primary);
   }
 
   .trail-awaiting_approval .trail-card,
@@ -694,7 +760,7 @@
 
   .trail-awaiting_approval .trail-rail::before,
   .trail-awaiting_input .trail-rail::before {
-    background: var(--color-warning);
+    border-color: var(--color-warning);
   }
 
   /* Turn and session boundaries are structure, not events -- leaving them
@@ -706,6 +772,7 @@
   .trail-row:not(.trail-open).trail-starting .trail-card,
   .trail-row:not(.trail-open).trail-thinking .trail-card {
     @apply border-0 bg-transparent px-0 py-0.5;
+    box-shadow: none;
   }
 
   .trail-row:not(.trail-open).trail-turn_done .trail-head,
@@ -727,18 +794,23 @@
     @apply pt-0.5;
   }
 
+  /* Boundaries are not stations: a bare 3px tick on the line, no ring. */
   .trail-row:not(.trail-open).trail-turn_done .trail-rail::before,
   .trail-row:not(.trail-open).trail-starting .trail-rail::before,
   .trail-row:not(.trail-open).trail-thinking .trail-rail::before {
-    @apply top-1.5 left-[3px] size-[3px];
+    @apply top-1.5 left-[4px] size-[3px];
+    border: 0;
+    background: var(--color-control-outline);
   }
 
   /* The open head: accent outline plus the palest fill, with a solid dot. The
-     card's colour carries "still running"; the marker no longer has to. */
+     card's colour carries "still running"; the marker no longer has to. It
+     sits at the higher elevation because it is the one thing still moving. */
   .trail-open .trail-card {
     @apply px-3 py-2;
     border-color: var(--color-primary-outline);
     background: var(--color-primary-container-soft);
+    box-shadow: var(--shadow-raised);
   }
 
   .trail-open .trail-time {
@@ -749,13 +821,19 @@
     @apply text-on-primary-container-dim;
   }
 
+  /* The live station is the one solid dot, and it breathes: a slow halo pulse
+     says "making progress" without a word. Blocked and failed variants stop
+     the pulse -- breathing is a claim of progress. */
   .trail-open .trail-rail::before {
-    @apply top-[11px] left-0 size-[9px];
+    @apply top-[12px] left-[1px] size-[9px];
+    border: 0;
     background: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-container);
+    animation: rail-pulse 2.5s ease-in-out infinite;
   }
 
   .trail-open .trail-rail::after {
-    @apply top-[22px];
+    @apply top-[26px];
   }
 
   .trail-title-live {
@@ -780,6 +858,14 @@
   .trail-open.trail-awaiting_approval .trail-rail::before,
   .trail-open.trail-awaiting_input .trail-rail::before {
     background: var(--color-warning);
+    box-shadow: 0 0 0 3px var(--color-warning-container);
+    animation: none;
+  }
+
+  .trail-open.trail-failed .trail-rail::before {
+    background: var(--color-error);
+    box-shadow: 0 0 0 3px var(--color-error-container);
+    animation: none;
   }
 
   .trail-open.trail-failed .trail-card {
@@ -823,7 +909,6 @@
 
   .detail-links {
     @apply mt-auto gap-x-3 px-4 py-1.5 text-caption;
-    border-top: 1px solid var(--color-outline);
   }
 
   .detail-links a {
@@ -841,8 +926,10 @@
   }
 
   .error-panel {
-    @apply m-4 px-4 py-3;
-    border: 1px solid var(--color-error);
+    @apply m-4 rounded-card px-4 py-3;
+    border: 1px solid var(--color-error-outline);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
   }
 
   .error-title {
@@ -851,6 +938,258 @@
 
   .error-copy {
     @apply m-0 text-secondary;
+  }
+
+  /* Prompt reader. Origin colouring follows the palette rule above: teal marks
+     what is specific to this issue, everything constant stays grey, and amber
+     and red are left alone so they keep meaning trouble. */
+  .prompt-head {
+    @apply flex shrink-0 flex-wrap items-center gap-2 px-4;
+  }
+
+  .prompt-back {
+    @apply flex cursor-pointer items-center rounded-chip border-0 bg-transparent p-1 leading-none;
+    color: var(--color-on-surface-faint);
+  }
+
+  .prompt-back:hover,
+  .prompt-back:focus-visible {
+    background: var(--color-surface-container);
+    color: var(--color-on-surface);
+  }
+
+  .prompt-head-meta {
+    @apply ml-auto text-caption;
+    color: var(--color-on-surface-faint);
+  }
+
+  .prompt-origins {
+    @apply flex shrink-0 items-center gap-4 px-4 text-caption;
+    color: var(--color-on-surface-faint);
+  }
+
+  .prompt-origin-key {
+    @apply flex items-center gap-1.5;
+  }
+
+  .prompt-dot {
+    @apply inline-block h-2 w-2 shrink-0 rounded-chip;
+    background: var(--color-on-surface-faint);
+  }
+
+  .prompt-dot-issue {
+    background: var(--color-primary);
+  }
+
+  .prompt-dot-unknown {
+    background: var(--color-control-outline);
+  }
+
+  .prompt-ratio {
+    @apply ml-auto flex h-1.5 w-32 overflow-hidden rounded-chip;
+    background: var(--color-on-surface-faint);
+  }
+
+  .prompt-ratio-issue {
+    @apply block h-full;
+    background: var(--color-primary);
+  }
+
+  .prompt-split {
+    @apply grid min-h-0 flex-1;
+    grid-template-columns: minmax(0, 210px) minmax(0, 1fr);
+  }
+
+  .prompt-outline {
+    @apply min-h-0 overflow-y-auto py-2;
+    border-right: 1px solid var(--color-outline);
+    background: var(--color-surface-container-low);
+  }
+
+  .prompt-outline-group {
+    @apply mt-2 mb-1 px-3 text-caption first:mt-0;
+    color: var(--color-on-surface-faint);
+  }
+
+  .prompt-outline-row {
+    @apply flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-1 text-left text-caption;
+    color: var(--color-on-surface);
+  }
+
+  .prompt-outline-row:hover,
+  .prompt-outline-row:focus-visible {
+    background: var(--color-surface-container);
+    outline: none;
+  }
+
+  .prompt-outline-row.is-selected {
+    background: var(--color-surface-container-high);
+  }
+
+  .prompt-outline-title {
+    @apply min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap;
+  }
+
+  .prompt-outline-chars {
+    @apply shrink-0;
+    color: var(--color-on-surface-faint);
+  }
+
+  .prompt-section {
+    @apply min-h-0 overflow-y-auto px-4 py-3;
+  }
+
+  .prompt-section-head {
+    @apply mt-0 mb-1 flex flex-wrap items-center gap-2;
+  }
+
+  .prompt-section-title {
+    @apply text-section-title font-medium;
+  }
+
+  .prompt-section-meta {
+    @apply mt-0 mb-2 text-caption;
+    color: var(--color-on-surface-faint);
+  }
+
+  .prompt-tag {
+    @apply rounded-chip px-1.5 py-px text-caption;
+    color: var(--color-on-surface-faint);
+    border: 1px solid var(--color-control-outline);
+  }
+
+  .prompt-tag-issue {
+    @apply bg-primary-container text-on-primary-container;
+    border-color: var(--color-primary-outline);
+  }
+
+  .prompt-body {
+    @apply m-0 rounded-card px-3 py-2 font-mono text-microcopy whitespace-pre-wrap;
+    border: 1px solid var(--color-outline);
+    background: var(--color-surface);
+    color: var(--color-secondary);
+    box-shadow: var(--shadow-card);
+    line-height: 1.6;
+  }
+
+  /* The prompt index is the durable way into the archive: it is rebuilt from
+     disk on every refresh, so it survives both trail eviction and orchestrator
+     restarts. */
+  .prompt-index {
+    @apply flex shrink-0 flex-wrap items-center gap-1.5 px-4;
+  }
+
+  .prompt-index-label {
+    @apply text-microcopy text-secondary lowercase;
+  }
+
+  .prompt-chip {
+    @apply cursor-pointer rounded-full px-2 py-0.5 text-caption;
+    border: 1px solid var(--color-control-outline);
+    background: var(--color-surface);
+    color: var(--color-secondary);
+  }
+
+  .prompt-chip:hover,
+  .prompt-chip:focus-visible {
+    background: var(--color-surface-container);
+    color: var(--color-on-surface);
+    outline: none;
+  }
+
+  /* One run of one session: the timestamp carries "when", the chips carry
+     "how many turns". Ten runs of T1 must read as ten dispatches. */
+  .prompt-run {
+    @apply inline-flex items-center gap-1;
+  }
+
+  .prompt-run-time {
+    @apply text-caption;
+    color: var(--color-on-surface-faint);
+  }
+
+  .prompt-index-toggle {
+    @apply cursor-pointer rounded-full px-2 py-0.5 text-caption;
+    border: 1px dashed var(--color-control-outline);
+    background: transparent;
+    color: var(--color-on-surface-faint);
+    outline: none;
+  }
+
+  .prompt-index-toggle:hover,
+  .prompt-index-toggle:focus-visible {
+    background: var(--color-surface-container);
+    color: var(--color-on-surface);
+  }
+
+  /* A turn divider is structure, like the unboxed turn markers, but clickable:
+     the whole line opens the archived prompt. */
+  .trail-turn-divider {
+    @apply mb-2 flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent p-0 py-1 text-left;
+    outline: none;
+  }
+
+  .trail-turn-label {
+    @apply shrink-0 rounded-full px-2 py-px text-caption;
+    background: var(--color-primary-container-soft);
+    color: var(--color-on-primary-container);
+  }
+
+  .trail-turn-rule {
+    @apply h-0 min-w-0 flex-1;
+    border-top: 1px dashed var(--color-outline);
+  }
+
+  .trail-turn-view {
+    @apply shrink-0 text-caption;
+    color: var(--color-on-surface-faint);
+  }
+
+  .trail-turn-divider:hover .trail-turn-view,
+  .trail-turn-divider:focus-visible .trail-turn-view {
+    color: var(--color-on-surface);
+  }
+
+  /* Two views of one timeline, not two timelines: narrative answers "what
+     happened" without the how. A segmented control -- recessed track, raised
+     active segment -- so the switch itself shows which plane is on top. */
+  .trail-filter {
+    @apply ml-auto inline-flex rounded-full p-0.5;
+    background: var(--color-surface-container);
+  }
+
+  .trail-filter-option {
+    @apply cursor-pointer rounded-full border-0 bg-transparent px-2.5 py-0.5 text-caption;
+    color: var(--color-on-surface-faint);
+    outline: none;
+  }
+
+  .trail-filter-option:hover,
+  .trail-filter-option:focus-visible {
+    color: var(--color-on-surface);
+  }
+
+  .trail-filter-option.is-active {
+    @apply font-medium text-on-surface;
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
+  }
+}
+
+@keyframes rail-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px var(--color-primary-container);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px var(--color-primary-container-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trail-open .trail-rail::before {
+    animation: none;
   }
 }
 
