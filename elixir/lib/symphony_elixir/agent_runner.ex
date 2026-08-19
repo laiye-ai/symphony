@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Linear.Issue, PromptArchive, PromptBuilder, Tracker, Workflow, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -92,6 +92,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     turn_started_at_ms = System.monotonic_time(:millisecond)
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    archive_turn_prompt(codex_update_recipient, issue, opts, turn_number, prompt)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
@@ -171,6 +172,27 @@ defmodule SymphonyElixir.AgentRunner do
 
     :ok
   end
+
+  # The dashboard is the only place a human can see what the agent was told, so
+  # the prompt is archived before the turn starts rather than after it settles;
+  # a turn that dies mid-flight still leaves its instructions behind.
+  defp archive_turn_prompt(recipient, %Issue{id: issue_id} = issue, opts, turn_number, prompt)
+       when is_binary(issue_id) do
+    case PromptArchive.record(issue, turn_number, prompt,
+           attempt: Keyword.get(opts, :attempt),
+           workflow_file: Workflow.workflow_file_path()
+         ) do
+      {:ok, ref} ->
+        if is_pid(recipient), do: send(recipient, {:turn_prompt_archived, issue_id, ref})
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Skipped prompt archive for #{issue_context(issue)} turn=#{turn_number}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp archive_turn_prompt(_recipient, _issue, _opts, _turn_number, _prompt), do: :ok
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 

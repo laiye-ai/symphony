@@ -19,8 +19,15 @@ defmodule SymphonyElixir.Orchestrator do
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   # Semantic events only; streaming deltas never reach the trail, so this holds
-  # a meaningful stretch of history rather than a second of noise.
-  @activity_trail_limit 50
+  # a meaningful stretch of history rather than a second of noise. The cap is
+  # split by class because the two kinds of event arrive at very different
+  # rates: commands, tools and searches land every few seconds, while what the
+  # agent said, what it was told and what blocked it land a few times per turn.
+  # One shared cap let a busy run of tooling evict every message; with a budget
+  # per class the tail of the trail degrades to narrative-only instead.
+  @mechanical_trail_limit 50
+  @narrative_trail_limit 30
+  @narrative_trail_kinds [:writing, :prompt, :awaiting_approval, :awaiting_input]
   @stdout_tail_limit 2_048
   @recent_sessions_limit 20
   @empty_codex_totals %{
@@ -186,6 +193,20 @@ defmodule SymphonyElixir.Orchestrator do
           running_entry
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
+  def handle_info({:turn_prompt_archived, issue_id, ref}, %{running: running} = state)
+      when is_binary(issue_id) and is_map(ref) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        updated_running_entry = merge_activity_trail(running_entry, %{trail: prompt_trail_entry(ref)})
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -1430,12 +1451,54 @@ defmodule SymphonyElixir.Orchestrator do
       running_entry
       |> Map.get(:activity_trail, [])
       |> then(&[entry | &1])
-      |> Enum.take(@activity_trail_limit)
+      |> cap_activity_trail()
 
     Map.put(running_entry, :activity_trail, trail)
   end
 
   defp merge_activity_trail(running_entry, _effects), do: running_entry
+
+  # Walks newest-first and keeps the first N of each class, so relative order
+  # within the trail is preserved and eviction always drops the oldest entry
+  # of whichever class is over its budget.
+  defp cap_activity_trail(trail) do
+    trail
+    |> Enum.reduce({[], 0, 0}, fn entry, {kept, narrative, mechanical} ->
+      cond do
+        narrative_trail_entry?(entry) and narrative < @narrative_trail_limit ->
+          {[entry | kept], narrative + 1, mechanical}
+
+        not narrative_trail_entry?(entry) and mechanical < @mechanical_trail_limit ->
+          {[entry | kept], narrative, mechanical + 1}
+
+        true ->
+          {kept, narrative, mechanical}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
+  defp narrative_trail_entry?(%{kind: kind}), do: kind in @narrative_trail_kinds
+  defp narrative_trail_entry?(_entry), do: false
+
+  # The trail carries the archive reference, not the prompt itself: a snapshot
+  # ships to every connected dashboard on each event, and a 40KB prompt riding
+  # along would dwarf everything else in it.
+  defp prompt_trail_entry(ref) do
+    %{
+      at: Map.get(ref, :at) || DateTime.utc_now(),
+      kind: :prompt,
+      title: "Turn #{Map.get(ref, :turn)} prompt injected",
+      meta: nil,
+      prompt: %{
+        identifier: Map.get(ref, :identifier),
+        basename: Map.get(ref, :basename),
+        turn: Map.get(ref, :turn),
+        chars: Map.get(ref, :chars)
+      }
+    }
+  end
 
   defp merge_effect(running_entry, effects, effect_key, entry_key) do
     case Map.fetch(effects, effect_key) do

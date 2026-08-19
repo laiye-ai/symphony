@@ -55,7 +55,9 @@ defmodule SymphonyElixir.CodexActivityTest do
       })
 
     assert %{trail: trail} = Activity.observe(update)
-    assert trail.kind == :failed
+    # A failed command is not a failed turn: it keeps its own kind so the
+    # narrative view can drop it with the rest of the tooling noise.
+    assert trail.kind == :command_failed
     assert trail.title == "mix dialyzer"
     assert trail.meta == "exit 1"
   end
@@ -333,7 +335,7 @@ defmodule SymphonyElixir.CodexActivityTest do
     assert %{trail: %{kind: :command, title: "Command finished", meta: "exit 0"}} =
              Activity.observe(legacy.("exec_command_end", %{"exit_code" => 0}))
 
-    assert %{trail: %{kind: :failed, title: "Command finished", meta: "exit 2"}} =
+    assert %{trail: %{kind: :command_failed, title: "Command finished", meta: "exit 2"}} =
              Activity.observe(legacy.("exec_command_end", %{"exitCode" => 2}))
 
     assert %{trail: %{title: "Command finished", meta: nil}} = Activity.observe(legacy.("exec_command_end", %{}))

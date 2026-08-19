@@ -34,6 +34,7 @@ defmodule SymphonyElixir.Codex.Activity do
           | :awaiting_input
           | :turn_done
           | :failed
+          | :command_failed
 
   @type t :: %{
           kind: kind(),
@@ -304,7 +305,7 @@ defmodule SymphonyElixir.Codex.Activity do
 
   defp legacy_effects("exec_command_end", payload, timestamp) do
     exit_code = integer_at(payload, [["params", "msg", "exit_code"], ["params", "msg", "exitCode"]])
-    kind = if exit_code in [0, nil], do: :command, else: :failed
+    kind = if exit_code in [0, nil], do: :command, else: :command_failed
 
     meta = if is_integer(exit_code), do: "exit #{exit_code}", else: nil
     settled = Map.put(activity(:thinking, "Thinking", nil, nil, timestamp), :soft, true)
@@ -394,11 +395,15 @@ defmodule SymphonyElixir.Codex.Activity do
     |> Map.put(:soft, true)
   end
 
+  # A non-zero exit is its own kind, apart from `:failed`: a grep with no
+  # matches exits 1 as part of ordinary work, while `:failed` means the turn
+  # itself went down. Views that keep "the story" keep turn failures and are
+  # free to drop failed commands with the rest of the tooling noise.
   defp command_completion(item) do
     title = item_command(item) || "a command"
 
     case integer_at(item, [["exitCode"], ["exit_code"]]) do
-      code when is_integer(code) and code != 0 -> {:failed, title, "exit #{code}"}
+      code when is_integer(code) and code != 0 -> {:command_failed, title, "exit #{code}"}
       code when is_integer(code) -> {:command, title, "exit #{code}"}
       _ -> {:command, title, nil}
     end
