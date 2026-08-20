@@ -252,6 +252,39 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule PromptContext do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string)
+      field(:required, :boolean, default: false)
+      field(:timeout_ms, :integer, default: 30_000)
+      field(:max_chars, :integer, default: 16_384)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:command, :required, :timeout_ms, :max_chars], empty_values: [])
+      |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_number(:max_chars, greater_than: 0)
+      |> validate_command_when_required()
+    end
+
+    defp validate_command_when_required(changeset) do
+      if get_field(changeset, :required) and blank?(get_field(changeset, :command)) do
+        add_error(changeset, :command, "is required when prompt_context.required is true")
+      else
+        changeset
+      end
+    end
+
+    defp blank?(value), do: not is_binary(value) or String.trim(value) == ""
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -299,6 +332,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:prompt_context, PromptContext, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -391,6 +425,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:prompt_context, with: &PromptContext.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)

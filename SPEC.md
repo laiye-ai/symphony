@@ -605,6 +605,10 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `prompt_context.command`: optional shell command string, default unset
+- `prompt_context.required`: boolean, default `false`
+- `prompt_context.timeout_ms`: positive integer, default `30000`
+- `prompt_context.max_chars`: positive integer, default `16384`
 
 ## 7. Orchestration State Machine
 
@@ -644,6 +648,10 @@ Important nuance:
   session normally. The orchestrator's continuation retry redispatches the still-active issue with
   a fresh coding-agent session, so workflow roles such as build, review, and rework do not inherit
   one another's live thread history.
+- If a completed turn leaves a valid `.symphony/fresh-thread-handoff.json` receipt bound to the
+  issue and the current prompt-context contract hash, the worker SHOULD consume it and end the
+  current session normally. The ordinary continuation retry then redispatches the unchanged active
+  issue with a fresh coding-agent session.
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
@@ -1243,6 +1251,7 @@ Inputs to prompt rendering:
 - `workflow.prompt_template`
 - normalized `issue` object
 - OPTIONAL `attempt` integer (retry/continuation metadata)
+- OPTIONAL output from `prompt_context.command`, evaluated immediately before each turn
 
 ### 12.2 Rendering Rules
 
@@ -1250,6 +1259,16 @@ Inputs to prompt rendering:
 - Render with strict filter checking.
 - Convert issue object keys to strings for template compatibility.
 - Preserve nested arrays/maps (labels, blockers) so templates can iterate.
+- When `prompt_context.command` is configured, run it inside the issue workspace with
+  `SYMPHONY_ISSUE_IDENTIFIER`, `SYMPHONY_ISSUE_STATE`, and `SYMPHONY_CONTEXT_PHASE` in the
+  environment. Map the standard active states to `todo`, `build`, `rework`, and `review`.
+- Bound provider execution by `prompt_context.timeout_ms` and successful output by
+  `prompt_context.max_chars`. Successful output MUST contain a 64-hex contract-hash receipt and is
+  appended under a distinct `## Phase Context` section.
+- A required provider error MUST fail the attempt before the turn starts. An optional provider error
+  SHOULD be logged and MAY fall back to the static prompt alone.
+- Prompt archives SHOULD attribute tracker text, workflow template, and phase context separately and
+  persist the phase and compact contract-hash receipt.
 
 ### 12.3 Retry/Continuation Semantics
 
@@ -1853,6 +1872,14 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("prompt error")
 
+    phase_context = run_prompt_context_provider(workspace.path, issue)
+    if required phase_context failed:
+      app_server.stop_session(session)
+      run_hook_best_effort("after_run", workspace.path)
+      fail_worker("prompt context error")
+
+    prompt = append_phase_context(prompt, phase_context)
+
     turn_result = app_server.run_turn(
       session=session,
       prompt=prompt,
@@ -1864,6 +1891,18 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
       app_server.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("agent turn error")
+
+    fresh_thread = consume_fresh_thread_receipt(
+      workspace.path,
+      issue.identifier,
+      phase_context.contract_hash
+    )
+    if fresh_thread is valid:
+      break
+    if fresh_thread is invalid:
+      app_server.stop_session(session)
+      run_hook_best_effort("after_run", workspace.path)
+      fail_worker("invalid fresh-thread receipt")
 
     refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
     if refreshed_issue failed:

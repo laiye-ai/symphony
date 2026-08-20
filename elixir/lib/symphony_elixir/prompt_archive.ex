@@ -30,7 +30,7 @@ defmodule SymphonyElixir.PromptArchive do
 
   @type section :: %{
           title: String.t(),
-          origin: :issue | :template | :unknown,
+          origin: :issue | :template | :phase_context | :unknown,
           chars: non_neg_integer(),
           body: String.t()
         }
@@ -58,6 +58,9 @@ defmodule SymphonyElixir.PromptArchive do
           workflow_file: String.t() | nil,
           issue_chars: non_neg_integer(),
           template_chars: non_neg_integer(),
+          phase_context_chars: non_neg_integer(),
+          phase: String.t() | nil,
+          contract_hash: String.t() | nil,
           sections: [section()]
         }
 
@@ -75,6 +78,7 @@ defmodule SymphonyElixir.PromptArchive do
       directory = Path.join(root(), identifier)
       path = Path.join(directory, basename)
       {offset, length} = description_range(prompt, issue.description)
+      phase_context = Keyword.get(opts, :phase_context)
 
       payload =
         Jason.encode!(%{
@@ -87,6 +91,10 @@ defmodule SymphonyElixir.PromptArchive do
           "workflow_file" => Keyword.get(opts, :workflow_file),
           "description_offset" => offset,
           "description_length" => length,
+          "phase_context_offset" => field(phase_context, :offset),
+          "phase_context_length" => field(phase_context, :length),
+          "phase" => field(phase_context, :phase),
+          "contract_hash" => field(phase_context, :contract_hash),
           "prompt" => prompt
         })
 
@@ -182,6 +190,19 @@ defmodule SymphonyElixir.PromptArchive do
   """
   @spec sections(String.t(), non_neg_integer() | nil, non_neg_integer() | nil) :: [section()]
   def sections(prompt, description_offset, description_length) when is_binary(prompt) do
+    sections(prompt, description_offset, description_length, nil, nil)
+  end
+
+  @doc false
+  @spec sections(
+          String.t(),
+          non_neg_integer() | nil,
+          non_neg_integer() | nil,
+          non_neg_integer() | nil,
+          non_neg_integer() | nil
+        ) :: [section()]
+  def sections(prompt, description_offset, description_length, phase_context_offset, phase_context_length)
+      when is_binary(prompt) do
     boundaries = [{0, nil} | heading_offsets(prompt)]
     total = byte_size(prompt)
 
@@ -192,7 +213,14 @@ defmodule SymphonyElixir.PromptArchive do
     |> Enum.map(fn {start, heading, body} ->
       %{
         title: section_title(heading, body),
-        origin: origin_at(start, description_offset, description_length),
+        origin:
+          origin_at(
+            start,
+            description_offset,
+            description_length,
+            phase_context_offset,
+            phase_context_length
+          ),
         chars: String.length(body),
         body: body
       }
@@ -229,7 +257,9 @@ defmodule SymphonyElixir.PromptArchive do
     prompt = Map.get(decoded, "prompt", "")
     offset = Map.get(decoded, "description_offset")
     length = Map.get(decoded, "description_length")
-    sections = sections(prompt, offset, length)
+    phase_context_offset = Map.get(decoded, "phase_context_offset")
+    phase_context_length = Map.get(decoded, "phase_context_length")
+    sections = sections(prompt, offset, length, phase_context_offset, phase_context_length)
 
     %{
       identifier: identifier,
@@ -243,6 +273,9 @@ defmodule SymphonyElixir.PromptArchive do
       workflow_file: Map.get(decoded, "workflow_file"),
       issue_chars: sum_chars(sections, :issue),
       template_chars: sum_chars(sections, :template) + sum_chars(sections, :unknown),
+      phase_context_chars: sum_chars(sections, :phase_context),
+      phase: Map.get(decoded, "phase"),
+      contract_hash: Map.get(decoded, "contract_hash"),
       sections: sections
     }
   end
@@ -256,11 +289,20 @@ defmodule SymphonyElixir.PromptArchive do
   # Section origin is decided by byte offset rather than by re-matching text:
   # the description is interpolated verbatim, so its range is the only place
   # tracker prose can appear, and headings inside it must stay tracker-owned.
-  defp origin_at(_start, offset, length) when is_nil(offset) or is_nil(length), do: :unknown
+  defp origin_at(start, _offset, _length, phase_offset, phase_length)
+       when is_integer(phase_offset) and is_integer(phase_length) and start >= phase_offset and
+              start < phase_offset + phase_length,
+       do: :phase_context
 
-  defp origin_at(start, offset, length) when start >= offset and start < offset + length, do: :issue
+  defp origin_at(_start, offset, length, _phase_offset, _phase_length)
+       when is_nil(offset) or is_nil(length),
+       do: :unknown
 
-  defp origin_at(_start, _offset, _length), do: :template
+  defp origin_at(start, offset, length, _phase_offset, _phase_length)
+       when start >= offset and start < offset + length,
+       do: :issue
+
+  defp origin_at(_start, _offset, _length, _phase_offset, _phase_length), do: :template
 
   defp heading_offsets(prompt) do
     prompt
@@ -298,6 +340,9 @@ defmodule SymphonyElixir.PromptArchive do
       :nomatch -> {nil, nil}
     end
   end
+
+  defp field(value, key) when is_map(value), do: Map.get(value, key)
+  defp field(_value, _key), do: nil
 
   # Every turn writes ~40KB, so an unbounded archive quietly grows into the
   # hundreds of megabytes on a busy board. Keep the recent history per issue.

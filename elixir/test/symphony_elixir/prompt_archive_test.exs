@@ -88,6 +88,35 @@ defmodule SymphonyElixir.PromptArchiveTest do
     assert record.issue_chars + record.template_chars == record.chars
   end
 
+  test "attributes injected phase context separately and persists its compact receipt" do
+    base_prompt = prompt(@description)
+    phase_text = "## Phase Context\n\n# Task Context\n\n## Active Rules\n\n- Stay bounded.\n"
+    full_prompt = base_prompt <> "\n" <> phase_text
+    context_offset = byte_size(base_prompt) + 1
+    hash = String.duplicate("d", 64)
+
+    {:ok, ref} =
+      PromptArchive.record(issue(), 1, full_prompt,
+        phase_context: %{
+          offset: context_offset,
+          length: byte_size(phase_text),
+          phase: "review",
+          contract_hash: hash
+        }
+      )
+
+    {:ok, record} = PromptArchive.read(ref.identifier, ref.basename)
+
+    assert record.phase == "review"
+    assert record.contract_hash == hash
+    assert record.phase_context_chars > 0
+    assert record.issue_chars + record.template_chars + record.phase_context_chars == record.chars
+
+    origins = Map.new(record.sections, &{&1.title, &1.origin})
+    assert origins["Phase Context"] == :phase_context
+    assert origins["Active Rules"] == :phase_context
+  end
+
   test "lists archived prompts oldest first from basenames alone" do
     {:ok, first} = PromptArchive.record(issue(), 1, prompt(@description), at: ~U[2026-07-31 08:00:00Z])
     {:ok, second} = PromptArchive.record(issue(), 2, prompt(@description), at: ~U[2026-07-31 08:05:00Z])

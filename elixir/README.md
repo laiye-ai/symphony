@@ -100,6 +100,12 @@ agent:
   max_turns: 20
 codex:
   command: codex app-server
+prompt_context:
+  command: |
+    ./bin/task-context --issue "$SYMPHONY_ISSUE_IDENTIFIER" --phase "$SYMPHONY_CONTEXT_PHASE"
+  required: true
+  timeout_ms: 30000
+  max_chars: 16384
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -121,6 +127,18 @@ Notes:
   Symphony validation.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `prompt_context.command` optionally runs in the issue workspace immediately before every turn.
+  Symphony sets `SYMPHONY_ISSUE_IDENTIFIER`, `SYMPHONY_ISSUE_STATE`, and
+  `SYMPHONY_CONTEXT_PHASE` (`todo`, `build`, `rework`, or `review`), then appends successful output
+  under `## Phase Context`. The output must contain a Markdown receipt line of the form
+  ``- Contract hash: `<64 hexadecimal characters>` ``.
+- `prompt_context.required` defaults to `false`. A required provider failure, timeout, empty or
+  malformed output, or output beyond `max_chars` fails the worker attempt before the Codex turn starts;
+  optional provider failures are logged and the turn continues without phase context.
+- An agent can request a fresh thread without changing tracker state by writing
+  `.symphony/fresh-thread-handoff.json`. Symphony consumes it only after a successful turn and only
+  when its issue identifier and contract hash match that turn's phase-context receipt. Valid reasons
+  are `late-mechanism`, `convergence`, and `context-reset`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

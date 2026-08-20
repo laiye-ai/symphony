@@ -981,6 +981,10 @@
     background: var(--color-primary);
   }
 
+  .prompt-dot-phase_context {
+    background: var(--color-warning);
+  }
+
   .prompt-dot-unknown {
     background: var(--color-control-outline);
   }
@@ -993,6 +997,11 @@
   .prompt-ratio-issue {
     @apply block h-full;
     background: var(--color-primary);
+  }
+
+  .prompt-ratio-phase-context {
+    @apply block h-full;
+    background: var(--color-warning);
   }
 
   .prompt-split {
@@ -1061,6 +1070,11 @@
   .prompt-tag-issue {
     @apply bg-primary-container text-on-primary-container;
     border-color: var(--color-primary-outline);
+  }
+
+  .prompt-tag-phase_context {
+    @apply bg-warning-container text-warning;
+    border-color: var(--color-warning-outline);
   }
 
   .prompt-body {

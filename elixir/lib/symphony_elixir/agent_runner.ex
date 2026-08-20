@@ -5,7 +5,18 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptArchive, PromptBuilder, Tracker, Workflow, Workspace}
+
+  alias SymphonyElixir.{
+    Config,
+    FreshThreadHandoff,
+    Linear.Issue,
+    PromptArchive,
+    PromptBuilder,
+    PromptContext,
+    Tracker,
+    Workflow,
+    Workspace
+  }
 
   @type worker_host :: String.t() | nil
 
@@ -79,10 +90,20 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    turn_opts = Keyword.put(opts, :worker_host, worker_host)
 
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(
+          session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          turn_opts,
+          issue_state_fetcher,
+          1,
+          max_turns
+        )
       after
         AppServer.stop_session(session)
       end
@@ -91,10 +112,22 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     turn_started_at_ms = System.monotonic_time(:millisecond)
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
-    archive_turn_prompt(codex_update_recipient, issue, opts, turn_number, prompt)
+    worker_host = Keyword.get(opts, :worker_host)
 
-    with {:ok, turn_session} <-
+    with {:ok, phase_context} <- PromptContext.load(workspace, issue, worker_host),
+         {prompt, phase_context} <-
+           issue
+           |> build_turn_prompt(opts, turn_number, max_turns)
+           |> PromptContext.append(phase_context),
+         :none <-
+           FreshThreadHandoff.consume(
+             workspace,
+             issue,
+             phase_context && phase_context.contract_hash,
+             worker_host
+           ),
+         :ok <- archive_turn_prompt(codex_update_recipient, issue, opts, turn_number, prompt, phase_context),
+         {:ok, turn_session} <-
            AppServer.run_turn(
              app_session,
              prompt,
@@ -103,48 +136,104 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+      case FreshThreadHandoff.consume(
+             workspace,
+             issue,
+             phase_context && phase_context.contract_hash,
+             worker_host
+           ) do
+        {:ok, receipt} ->
+          finish_for_fresh_thread(issue, receipt)
 
-          throttle_continuation_turn(refreshed_issue, opts, turn_started_at_ms)
-
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
+        :none ->
+          continue_after_turn(
+            %{
+              app_session: app_session,
+              workspace: workspace,
+              issue: issue,
+              recipient: codex_update_recipient,
+              opts: opts,
+              issue_state_fetcher: issue_state_fetcher,
+              turn_number: turn_number,
+              max_turns: max_turns,
+              turn_started_at_ms: turn_started_at_ms
+            },
+            turn_session
           )
-
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-          :ok
-
-        {:state_changed, refreshed_issue} ->
-          Logger.info(
-            "Issue changed active workflow state for #{issue_context(refreshed_issue)} " <>
-              "session_id=#{turn_session[:session_id]} previous_state=#{inspect(issue.state)} state=#{inspect(refreshed_issue.state)}; " <>
-              "returning control to orchestrator for a fresh agent session"
-          )
-
-          :ok
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:rate_limited, reason} ->
-          Logger.warning("Linear rate limited while refreshing #{issue_context(issue)} turn=#{turn_number}/#{max_turns}: #{inspect(reason)}; returning control to orchestrator")
-
-          :ok
 
         {:error, reason} ->
           {:error, reason}
       end
+    else
+      {:ok, receipt} -> finish_for_fresh_thread(issue, receipt)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp finish_for_fresh_thread(issue, receipt) do
+    Logger.info(
+      "Consumed fresh-thread handoff for #{issue_context(issue)} " <>
+        "reason=#{receipt.reason} contract_hash=#{receipt.contract_hash}; " <>
+        "returning control to orchestrator for a fresh agent session"
+    )
+
+    :ok
+  end
+
+  defp continue_after_turn(run, turn_session) do
+    %{
+      app_session: app_session,
+      workspace: workspace,
+      issue: issue,
+      recipient: codex_update_recipient,
+      opts: opts,
+      issue_state_fetcher: issue_state_fetcher,
+      turn_number: turn_number,
+      max_turns: max_turns,
+      turn_started_at_ms: turn_started_at_ms
+    } = run
+
+    case continue_with_issue?(issue, issue_state_fetcher) do
+      {:continue, refreshed_issue} when turn_number < max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+        throttle_continuation_turn(refreshed_issue, opts, turn_started_at_ms)
+
+        do_run_codex_turns(
+          app_session,
+          workspace,
+          refreshed_issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number + 1,
+          max_turns
+        )
+
+      {:continue, refreshed_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
+        :ok
+
+      {:state_changed, refreshed_issue} ->
+        Logger.info(
+          "Issue changed active workflow state for #{issue_context(refreshed_issue)} " <>
+            "session_id=#{turn_session[:session_id]} previous_state=#{inspect(issue.state)} state=#{inspect(refreshed_issue.state)}; " <>
+            "returning control to orchestrator for a fresh agent session"
+        )
+
+        :ok
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:rate_limited, reason} ->
+        Logger.warning("Linear rate limited while refreshing #{issue_context(issue)} turn=#{turn_number}/#{max_turns}: #{inspect(reason)}; returning control to orchestrator")
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -176,11 +265,12 @@ defmodule SymphonyElixir.AgentRunner do
   # The dashboard is the only place a human can see what the agent was told, so
   # the prompt is archived before the turn starts rather than after it settles;
   # a turn that dies mid-flight still leaves its instructions behind.
-  defp archive_turn_prompt(recipient, %Issue{id: issue_id} = issue, opts, turn_number, prompt)
+  defp archive_turn_prompt(recipient, %Issue{id: issue_id} = issue, opts, turn_number, prompt, phase_context)
        when is_binary(issue_id) do
     case PromptArchive.record(issue, turn_number, prompt,
            attempt: Keyword.get(opts, :attempt),
-           workflow_file: Workflow.workflow_file_path()
+           workflow_file: Workflow.workflow_file_path(),
+           phase_context: phase_context
          ) do
       {:ok, ref} ->
         if is_pid(recipient), do: send(recipient, {:turn_prompt_archived, issue_id, ref})
@@ -192,7 +282,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp archive_turn_prompt(_recipient, _issue, _opts, _turn_number, _prompt), do: :ok
+  defp archive_turn_prompt(_recipient, _issue, _opts, _turn_number, _prompt, _phase_context), do: :ok
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 

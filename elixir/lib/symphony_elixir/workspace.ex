@@ -193,6 +193,21 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @doc """
+  Runs a bounded command in an issue workspace, locally or on its selected SSH
+  worker. The caller receives stdout, stderr, and the command exit status.
+  """
+  @spec run_command(Path.t(), String.t(), %{optional(String.t()) => String.t()}, pos_integer(), worker_host()) ::
+          {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
+  def run_command(workspace, command, env, timeout_ms, worker_host \\ nil)
+      when is_binary(workspace) and is_binary(command) and is_map(env) and is_integer(timeout_ms) and
+             timeout_ms > 0 do
+    case worker_host do
+      nil -> run_local_workspace_command(workspace, command, env, timeout_ms)
+      host when is_binary(host) -> run_remote_workspace_command(workspace, command, env, timeout_ms, host)
+    end
+  end
+
   defp workspace_path_for_issue(safe_id, nil) when is_binary(safe_id) do
     Config.settings!().workspace.root
     |> Path.join(safe_id)
@@ -290,6 +305,58 @@ defmodule SymphonyElixir.Workspace do
 
   defp ignore_hook_failure(:ok), do: :ok
   defp ignore_hook_failure({:error, _reason}), do: :ok
+
+  defp run_local_workspace_command(workspace, command, env, timeout_ms) do
+    task =
+      Task.async(fn ->
+        System.cmd("sh", ["-lc", command],
+          cd: workspace,
+          env: Map.to_list(env),
+          stderr_to_stdout: true
+        )
+      end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, result} ->
+        result |> normalize_command_result()
+
+      nil ->
+        Task.shutdown(task, :brutal_kill)
+        {:error, {:workspace_command_timeout, timeout_ms}}
+    end
+  end
+
+  defp run_remote_workspace_command(workspace, command, env, timeout_ms, worker_host) do
+    exports =
+      env
+      |> Enum.sort_by(fn {name, _value} -> name end)
+      |> Enum.map_join("\n", fn {name, value} -> "export #{name}=#{shell_escape(value)}" end)
+
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "cd \"$workspace\"",
+        exports,
+        command
+      ]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, timeout_ms) do
+      {:ok, result} ->
+        normalize_command_result(result)
+
+      {:error, {:workspace_hook_timeout, "remote_command", ^timeout_ms}} ->
+        {:error, {:workspace_command_timeout, timeout_ms}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp normalize_command_result({output, status}) when is_integer(status) and status >= 0 do
+    {:ok, {IO.iodata_to_binary(output), status}}
+  end
 
   defp run_hook(command, workspace, issue_context, hook_name, nil) do
     timeout_ms = Config.settings!().hooks.timeout_ms

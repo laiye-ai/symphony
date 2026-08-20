@@ -508,7 +508,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <span class="detail-id"><%= @view.identifier %></span>
       <span class="chip">turn <%= @view.turn %> prompt</span>
       <span class="prompt-head-meta mono">
-        <%= format_int(@view.chars) %> chars<%= if @view.issue_state, do: " · #{@view.issue_state}" %>
+        <%= format_int(@view.chars) %> chars<%= if @view.issue_state, do: " · #{@view.issue_state}" %><%= prompt_receipt(@view) %>
       </span>
     </header>
 
@@ -521,8 +521,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <span class="prompt-dot prompt-dot-template" aria-hidden="true"></span>
         workflow template <span class="mono"><%= format_int(@view.template_chars) %></span>
       </span>
+      <span class="prompt-origin-key">
+        <span class="prompt-dot prompt-dot-phase_context" aria-hidden="true"></span>
+        phase context <span class="mono"><%= format_int(@view.phase_context_chars) %></span>
+      </span>
       <span class="prompt-ratio" aria-hidden="true">
         <span class="prompt-ratio-issue" style={"width: #{percent_of(@view.issue_chars, @view.chars)}%"}></span>
+        <span class="prompt-ratio-phase-context" style={"width: #{percent_of(@view.phase_context_chars, @view.chars)}%"}></span>
       </span>
     </section>
 
@@ -872,7 +877,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp origin_label(:issue), do: "tracker text"
   defp origin_label(:template), do: "workflow template"
+  defp origin_label(:phase_context), do: "phase context"
   defp origin_label(_origin), do: "origin unknown"
+
+  defp prompt_receipt(%{phase: phase, contract_hash: hash})
+       when is_binary(phase) and is_binary(hash),
+       do: " · #{phase} · #{String.slice(hash, 0, 12)}"
+
+  defp prompt_receipt(_view), do: ""
 
   defp percent_of(_part, total) when not is_integer(total) or total <= 0, do: 0
 
