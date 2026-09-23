@@ -5,6 +5,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
+  @windows_symlink_skip_reason if(match?({:win32, _}, :os.type()),
+                                 do: "Windows symlink creation requires privileges unavailable in the test environment"
+                               )
+
+  @windows_multiline_argv_skip_reason if(match?({:win32, _}, :os.type()),
+                                        do: "Windows batch fixtures cannot preserve multiline argv like native OpenSSH"
+                                      )
+
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(
@@ -28,12 +36,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "git clone --depth 1 #{template_repo} ."
+        hook_after_create: "git clone --depth 1 #{shell_path(template_repo)} ."
       )
 
       assert {:ok, workspace} = Workspace.create_for_issue("S-1")
       assert File.exists?(Path.join(workspace, ".git"))
-      assert File.read!(Path.join(workspace, "README.md")) == "hook clone\n"
+
+      assert String.replace(File.read!(Path.join(workspace, "README.md")), "\r\n", "\n") ==
+               "hook clone\n"
+
       assert File.read!(Path.join([workspace, "keep", "file.txt"])) == "keep me"
     after
       File.rm_rf(test_root)
@@ -115,6 +126,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  @tag skip: @windows_symlink_skip_reason
   test "workspace rejects symlink escapes under the configured root" do
     test_root =
       Path.join(
@@ -143,6 +155,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  @tag skip: @windows_symlink_skip_reason
   test "workspace canonicalizes symlinked workspace roots before creating issue directories" do
     test_root =
       Path.join(
@@ -778,6 +791,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workflow config preserves Windows paths and quoted commands" do
+    windows_root = ~S(C:\Users\admin\AppData\Local\Temp\symphony-workspaces)
+    windows_command = ~S(C:\Program Files\Codex\codex.cmd --config "model=gpt-5.5" app-server)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: windows_root,
+      codex_command: windows_command
+    )
+
+    config = Config.settings!()
+    assert config.workspace.root == windows_root
+    assert config.codex.command == windows_command
+  end
+
   test "config reads defaults for optional settings" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
@@ -949,7 +976,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
-    workspace_root = Path.join("/tmp", "symphony-workspace-root")
+    workspace_root = Path.expand(Path.join(System.tmp_dir!(), "symphony-workspace-root"))
     api_key = "resolved-secret"
     codex_bin = Path.join(["~", "bin", "codex"])
 
@@ -979,7 +1006,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "config no longer resolves legacy env: references" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
-    workspace_root = Path.join("/tmp", "symphony-workspace-root")
+    workspace_root = Path.expand(Path.join(System.tmp_dir!(), "symphony-workspace-root"))
     api_key = "resolved-secret"
 
     previous_workspace_root = System.get_env(workspace_env_var)
@@ -1229,8 +1256,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     path = Path.join(System.tmp_dir!(), invalid_segment)
     expanded_path = Path.expand(path)
 
-    assert {:error, {:path_canonicalize_failed, ^expanded_path, :enametoolong}} =
-             SymphonyElixir.PathSafety.canonicalize(path)
+    case :os.type() do
+      {:win32, _} ->
+        assert {:ok, ^expanded_path} = SymphonyElixir.PathSafety.canonicalize(path)
+
+      _other ->
+        assert {:error, {:path_canonicalize_failed, ^expanded_path, :enametoolong}} =
+                 SymphonyElixir.PathSafety.canonicalize(path)
+    end
   end
 
   test "runtime sandbox policy resolution defaults when omitted and ignores workspace for explicit policies" do
@@ -1292,6 +1325,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
+  @tag skip: @windows_multiline_argv_skip_reason
   test "remote workspace lifecycle uses ssh host aliases from worker config" do
     test_root =
       Path.join(
@@ -1309,15 +1343,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     try do
       trace_file = Path.join(test_root, "ssh.trace")
-      fake_ssh = Path.join(test_root, "ssh")
       workspace_root = "~/.symphony-remote-workspaces"
       workspace_path = "/remote/home/.symphony-remote-workspaces/MT-SSH-WS"
 
       File.mkdir_p!(test_root)
-      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+      System.put_env("SYMP_TEST_SSH_TRACE", shell_path(trace_file))
+      System.put_env("PATH", prepend_path(test_root, previous_path || ""))
 
-      File.write!(fake_ssh, """
+      write_fake_executable!(test_root, "ssh", """
       #!/bin/sh
       trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
@@ -1330,8 +1363,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       exit 0
       """)
-
-      File.chmod!(fake_ssh, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,

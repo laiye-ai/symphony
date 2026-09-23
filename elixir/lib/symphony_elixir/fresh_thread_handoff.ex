@@ -10,7 +10,7 @@ defmodule SymphonyElixir.FreshThreadHandoff do
   alias SymphonyElixir.{Linear.Issue, Workspace}
 
   @receipt_path ".symphony/fresh-thread-handoff.json"
-  @valid_reasons MapSet.new(["late-mechanism", "convergence", "context-reset"])
+  @valid_reasons MapSet.new(["late-mechanism", "convergence", "context-reset", "environment"])
   @hash_pattern ~r/\A[0-9a-f]{64}\z/
 
   @type receipt :: %{

@@ -129,7 +129,7 @@ Notes:
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - `prompt_context.command` optionally runs in the issue workspace immediately before every turn.
   Symphony sets `SYMPHONY_ISSUE_IDENTIFIER`, `SYMPHONY_ISSUE_STATE`, and
-  `SYMPHONY_CONTEXT_PHASE` (`todo`, `build`, `rework`, or `review`), then appends successful output
+  `SYMPHONY_CONTEXT_PHASE` (`todo`, `build`, `rework`, `review`, or `environment`), then appends successful output
   under `## Phase Context`. The output must contain a Markdown receipt line of the form
   ``- Contract hash: `<64 hexadecimal characters>` ``.
 - `prompt_context.required` defaults to `false`. A required provider failure, timeout, empty or
@@ -138,7 +138,8 @@ Notes:
 - An agent can request a fresh thread without changing tracker state by writing
   `.symphony/fresh-thread-handoff.json`. Symphony consumes it only after a successful turn and only
   when its issue identifier and contract hash match that turn's phase-context receipt. Valid reasons
-  are `late-mechanism`, `convergence`, and `context-reset`.
+  are `late-mechanism`, `convergence`, `context-reset`, and `environment`; the environment reason
+  separates both entry to and recovery from the active `Fix Environment` state.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

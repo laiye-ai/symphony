@@ -4,6 +4,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   alias Mix.Tasks.Workspace.BeforeRemove
 
   import ExUnit.CaptureIO
+  import SymphonyElixir.TestSupport, only: [prepend_path: 2, shell_path: 1, write_fake_executable!: 3]
 
   setup do
     Mix.Task.reenable("workspace.before_remove")
@@ -305,17 +306,15 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       File.mkdir_p!(bin_dir)
       File.write!(log_path, "")
       original_path = System.get_env("PATH") || ""
-      path_with_binaries = Enum.join([bin_dir, original_path], ":")
+      path_with_binaries = prepend_path(bin_dir, original_path)
 
       Enum.each(scripts, fn {name, script} ->
-        path = Path.join(bin_dir, name)
-        File.write!(path, script)
-        File.chmod!(path, 0o755)
+        write_fake_executable!(bin_dir, name, script)
       end)
 
       with_env(
         %{
-          "GH_LOG" => log_path,
+          "GH_LOG" => shell_path(log_path),
           "PATH" => path_with_binaries
         },
         fn ->
@@ -328,7 +327,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   end
 
   defp with_path(paths, fun) do
-    with_env(%{"PATH" => Enum.join(paths, ":")}, fun)
+    with_env(%{"PATH" => Enum.join(paths, if(match?({:win32, _}, :os.type()), do: ";", else: ":"))}, fun)
   end
 
   defp with_env(overrides, fun) do
