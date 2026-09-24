@@ -1,10 +1,12 @@
 defmodule SymphonyElixir.SSH do
   @moduledoc false
 
+  alias SymphonyElixir.Command
+
   @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
-      {:ok, System.cmd(executable, ssh_args(host, command), opts)}
+      {:ok, Command.run(executable, ssh_args(host, command), opts)}
     end
   end
 
@@ -22,7 +24,7 @@ defmodule SymphonyElixir.SSH do
         ]
         |> maybe_put_line_option(line_bytes)
 
-      {:ok, Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)}
+      {:ok, Command.open_port(executable, ssh_args(host, command), port_opts)}
     end
   end
 

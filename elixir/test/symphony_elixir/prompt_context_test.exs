@@ -40,7 +40,11 @@ defmodule SymphonyElixir.PromptContextTest do
     assert attributed.offset == byte_size("# Workflow\n\n")
     assert attributed.length == byte_size("## Phase Context\n\n" <> loaded.text)
 
-    for {state, phase} <- [{"Todo", "todo"}, {"Rework", "rework"}] do
+    for {state, phase} <- [
+          {"Todo", "todo"},
+          {"Rework", "rework"},
+          {"Fix Environment", "environment"}
+        ] do
       assert {:ok, state_context} = PromptContext.load(workspace, issue(%{state: state}))
       assert state_context.phase == phase
     end

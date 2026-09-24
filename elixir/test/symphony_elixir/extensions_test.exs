@@ -552,7 +552,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert dashboard_css =~ ".trail-row:not(.trail-open).trail-thinking .trail-head"
     assert dashboard_css =~ ".trail-card.is-clamped .trail-toggle"
 
-    source_css = File.read!(Path.join(:code.priv_dir(:symphony_elixir), "../assets/css/app.css"))
+    source_css = File.read!(Path.expand("../../assets/css/app.css", __DIR__))
     # The shell must be bounded, not merely tall: with min-height the page grows
     # to fit the timeline and the inner overflow never engages.
     assert source_css =~ ~r/\.shell \{[^}]*h-screen[^}]*overflow-hidden/s

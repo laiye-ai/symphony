@@ -1261,7 +1261,10 @@ Inputs to prompt rendering:
 - Preserve nested arrays/maps (labels, blockers) so templates can iterate.
 - When `prompt_context.command` is configured, run it inside the issue workspace with
   `SYMPHONY_ISSUE_IDENTIFIER`, `SYMPHONY_ISSUE_STATE`, and `SYMPHONY_CONTEXT_PHASE` in the
-  environment. Map the standard active states to `todo`, `build`, `rework`, and `review`.
+  environment. Map the standard active states to `todo`, `build`, `rework`, `review`, and
+  `environment`; `Fix Environment` maps to `environment`. A valid fresh-thread handoff may use
+  reason `environment` for both entry to and recovery from that phase without changing the receipt
+  schema.
 - Bound provider execution by `prompt_context.timeout_ms` and successful output by
   `prompt_context.max_chars`. Successful output MUST contain a 64-hex contract-hash receipt and is
   appended under a distinct `## Phase Context` section.

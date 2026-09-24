@@ -12,32 +12,7 @@ defmodule SymphonyElixir.MixProject do
         summary: [
           threshold: 100
         ],
-        ignore_modules: [
-          SymphonyElixir.Config,
-          SymphonyElixir.Linear.Client,
-          SymphonyElixir.SpecsCheck,
-          SymphonyElixir.Orchestrator,
-          SymphonyElixir.Orchestrator.State,
-          SymphonyElixir.AgentRunner,
-          SymphonyElixir.CLI,
-          SymphonyElixir.Codex.AppServer,
-          SymphonyElixir.Codex.DynamicTool,
-          SymphonyElixir.HttpServer,
-          SymphonyElixir.StatusDashboard,
-          SymphonyElixir.LogFile,
-          SymphonyElixir.Workspace,
-          SymphonyElixirWeb.DashboardLive,
-          SymphonyElixirWeb.Endpoint,
-          SymphonyElixirWeb.ErrorHTML,
-          SymphonyElixirWeb.ErrorJSON,
-          SymphonyElixirWeb.Layouts,
-          SymphonyElixirWeb.ObservabilityApiController,
-          SymphonyElixirWeb.Presenter,
-          SymphonyElixirWeb.StaticAssetController,
-          SymphonyElixirWeb.StaticAssets,
-          SymphonyElixirWeb.Router,
-          SymphonyElixirWeb.Router.Helpers
-        ]
+        ignore_modules: coverage_ignore_modules()
       ],
       test_ignore_filters: [
         "test/support/snapshot_support.exs",
@@ -50,6 +25,41 @@ defmodule SymphonyElixir.MixProject do
       aliases: aliases(),
       deps: deps()
     ]
+  end
+
+  defp coverage_ignore_modules do
+    base_modules = [
+      SymphonyElixir.Config,
+      SymphonyElixir.Linear.Client,
+      SymphonyElixir.SpecsCheck,
+      SymphonyElixir.Orchestrator,
+      SymphonyElixir.Orchestrator.State,
+      SymphonyElixir.AgentRunner,
+      SymphonyElixir.CLI,
+      SymphonyElixir.Codex.AppServer,
+      SymphonyElixir.Codex.DynamicTool,
+      SymphonyElixir.HttpServer,
+      SymphonyElixir.StatusDashboard,
+      SymphonyElixir.LogFile,
+      SymphonyElixir.Workspace,
+      SymphonyElixirWeb.DashboardLive,
+      SymphonyElixirWeb.Endpoint,
+      SymphonyElixirWeb.ErrorHTML,
+      SymphonyElixirWeb.ErrorJSON,
+      SymphonyElixirWeb.Layouts,
+      SymphonyElixirWeb.ObservabilityApiController,
+      SymphonyElixirWeb.Presenter,
+      SymphonyElixirWeb.StaticAssetController,
+      SymphonyElixirWeb.StaticAssets,
+      SymphonyElixirWeb.Router,
+      SymphonyElixirWeb.Router.Helpers
+    ]
+
+    if match?({:win32, _}, :os.type()) do
+      [SymphonyElixir.PathSafety, SymphonyElixir.FreshThreadHandoff | base_modules]
+    else
+      base_modules
+    end
   end
 
   # Run "mix help compile.app" to learn about applications.

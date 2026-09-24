@@ -22,7 +22,15 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          prepend_path: 2,
+          restore_env: 2,
+          shell_path: 1,
+          stop_default_http_server: 0,
+          write_fake_executable!: 3,
+          write_workflow_file!: 1,
+          write_workflow_file!: 2
+        ]
 
       setup do
         workflow_root =
@@ -68,6 +76,62 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  def prepend_path(path, current_path) do
+    Enum.join([path, current_path], path_separator())
+  end
+
+  def shell_path(path) when is_binary(path) do
+    if windows?(), do: String.replace(path, "\\", "/"), else: path
+  end
+
+  def write_fake_executable!(directory, name, script) do
+    File.mkdir_p!(directory)
+
+    if windows?() do
+      shell_script = Path.join(directory, "#{name}.sh")
+      launcher_script = Path.join(directory, "#{name}-launcher.sh")
+      command_script = Path.join(directory, "#{name}.cmd")
+      bash = System.find_executable("bash") || raise "bash is required for test fixtures"
+
+      File.write!(shell_script, String.replace(script, "\r\n", "\n"))
+
+      File.write!(
+        launcher_script,
+        """
+        #!/bin/bash
+        arguments=()
+        for index in {1..32}; do
+          name="SYMPHONY_FAKE_ARG_\${index}"
+          if [[ ! -v "$name" ]]; then
+            break
+          fi
+          arguments+=("\${!name}")
+        done
+        set -- "\${arguments[@]}"
+        . '#{shell_path(shell_script)}'
+        """
+      )
+
+      argument_capture =
+        1..32
+        |> Enum.map_join("\r\n", fn index ->
+          "if \"%~1\"==\"\" goto symphony_args_done\r\nset \"SYMPHONY_FAKE_ARG_#{index}=%~1\"\r\nshift"
+        end)
+
+      File.write!(
+        command_script,
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n#{argument_capture}\r\n:symphony_args_done\r\n\"#{bash}\" \"#{launcher_script}\"\r\nexit /b %ERRORLEVEL%\r\n"
+      )
+
+      command_script
+    else
+      executable = Path.join(directory, name)
+      File.write!(executable, script)
+      File.chmod!(executable, 0o755)
+      executable
+    end
+  end
 
   def stop_default_http_server do
     case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
@@ -230,7 +294,7 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value) when is_binary(value) do
-    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+    Jason.encode!(value)
   end
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)
@@ -250,6 +314,9 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp path_separator, do: if(windows?(), do: ";", else: ":")
+  defp windows?, do: match?({:win32, _}, :os.type())
 
   defp prompt_context_yaml(nil, false, 30_000, 16_384), do: nil
 

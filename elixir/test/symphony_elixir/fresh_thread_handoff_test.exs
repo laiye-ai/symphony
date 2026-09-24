@@ -1,6 +1,10 @@
 defmodule SymphonyElixir.FreshThreadHandoffTest do
   use SymphonyElixir.TestSupport
 
+  @windows_permission_skip_reason if(match?({:win32, _}, :os.type()),
+                                    do: "Windows chmod does not enforce POSIX read and directory removal permissions"
+                                  )
+
   alias SymphonyElixir.FreshThreadHandoff
 
   @contract_hash String.duplicate("b", 64)
@@ -32,6 +36,17 @@ defmodule SymphonyElixir.FreshThreadHandoffTest do
     assert receipt.issue == "CLA-42"
     assert receipt.reason == "late-mechanism"
     assert receipt.requested_at == ~U[2026-08-20 01:02:03Z]
+    refute File.exists?(receipt_path(workspace))
+    assert :none = FreshThreadHandoff.consume(workspace, issue(), @contract_hash)
+  end
+
+  test "consumes an environment receipt exactly once", %{workspace: workspace} do
+    write_receipt(workspace, valid_payload() |> Map.put("reason", "environment"))
+
+    assert {:ok, receipt} =
+             FreshThreadHandoff.consume(workspace, issue(), @contract_hash)
+
+    assert receipt.reason == "environment"
     refute File.exists?(receipt_path(workspace))
     assert :none = FreshThreadHandoff.consume(workspace, issue(), @contract_hash)
   end
@@ -89,6 +104,7 @@ defmodule SymphonyElixir.FreshThreadHandoffTest do
              FreshThreadHandoff.consume(workspace, issue(), nil)
   end
 
+  @tag skip: @windows_permission_skip_reason
   test "surfaces receipt read and one-shot removal failures without losing the receipt", %{
     workspace: workspace
   } do

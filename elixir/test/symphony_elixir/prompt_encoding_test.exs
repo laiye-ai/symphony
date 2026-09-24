@@ -84,7 +84,7 @@ defmodule SymphonyElixir.PromptEncodingTest do
         end
       end)
 
-      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      System.put_env("SYMP_TEST_CODEx_TRACE", shell_path(trace_file))
       File.mkdir_p!(workspace)
 
       File.write!(codex_binary, """
@@ -121,7 +121,7 @@ defmodule SymphonyElixir.PromptEncodingTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server"
+        codex_command: "#{shell_path(codex_binary)} app-server"
       )
 
       issue = %Issue{

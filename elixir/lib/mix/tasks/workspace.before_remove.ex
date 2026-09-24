@@ -1,6 +1,8 @@
 defmodule Mix.Tasks.Workspace.BeforeRemove do
   use Mix.Task
 
+  alias SymphonyElixir.Command
+
   @shortdoc "Close open GitHub PRs for the current branch before workspace removal"
 
   @moduledoc """
@@ -131,7 +133,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemove do
         {:error, {:enoent, ""}}
 
       path ->
-        case System.cmd(path, args, stderr_to_stdout: true) do
+        case Command.run(path, args, stderr_to_stdout: true) do
           {output, 0} -> {:ok, output}
           {output, status} -> {:error, {status, output}}
         end

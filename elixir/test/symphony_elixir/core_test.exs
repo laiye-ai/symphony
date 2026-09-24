@@ -1187,8 +1187,8 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
-        codex_command: "#{codex_binary} app-server",
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
+        codex_command: "#{shell_path(codex_binary)} app-server",
         prompt_context_command: "printf '# Task Context\\n\\n- Contract hash: `#{contract_hash}`\\n'",
         prompt_context_required: true
       )
@@ -1275,8 +1275,8 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
-        codex_command: "#{codex_binary} app-server"
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
+        codex_command: "#{shell_path(codex_binary)} app-server"
       )
 
       issue = %Issue{
@@ -1329,13 +1329,11 @@ defmodule SymphonyElixir.CoreTest do
 
     try do
       trace_file = Path.join(test_root, "ssh.trace")
-      fake_ssh = Path.join(test_root, "ssh")
-
       File.mkdir_p!(test_root)
-      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+      System.put_env("SYMP_TEST_SSH_TRACE", shell_path(trace_file))
+      System.put_env("PATH", prepend_path(test_root, previous_path || ""))
 
-      File.write!(fake_ssh, """
+      write_fake_executable!(test_root, "ssh", """
       #!/bin/sh
       trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
@@ -1354,8 +1352,6 @@ defmodule SymphonyElixir.CoreTest do
           ;;
       esac
       """)
-
-      File.chmod!(fake_ssh, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: "~/.symphony-remote-workspaces",
@@ -1443,8 +1439,8 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
-        codex_command: "#{codex_binary} app-server",
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
+        codex_command: "#{shell_path(codex_binary)} app-server",
         max_turns: 3,
         prompt_context_command: "printf '# Task Context: %s\\n\\n- Phase: `%s`\\n- Contract hash: `#{context_hash}`\\n' \"$SYMPHONY_ISSUE_IDENTIFIER\" \"$SYMPHONY_CONTEXT_PHASE\"",
         prompt_context_required: true
@@ -1579,8 +1575,8 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
-        codex_command: "#{codex_binary} app-server",
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
+        codex_command: "#{shell_path(codex_binary)} app-server",
         max_turns: 2
       )
 
@@ -1678,7 +1674,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server"
+        codex_command: "#{shell_path(codex_binary)} app-server"
       )
 
       issue = %Issue{
@@ -1822,7 +1818,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} --config 'model=\"gpt-5.5\"' app-server"
+        codex_command: "#{shell_path(codex_binary)} --config 'model=\"gpt-5.5\"' app-server"
       )
 
       issue = %Issue{
@@ -1911,7 +1907,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server",
+        codex_command: "#{shell_path(codex_binary)} app-server",
         codex_approval_policy: "on-request",
         codex_thread_sandbox: "workspace-write",
         codex_turn_sandbox_policy: %{

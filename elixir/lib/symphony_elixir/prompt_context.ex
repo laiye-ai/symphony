@@ -74,6 +74,7 @@ defmodule SymphonyElixir.PromptContext do
       "in progress" -> {:ok, "build"}
       "rework" -> {:ok, "rework"}
       "agent review" -> {:ok, "review"}
+      "fix environment" -> {:ok, "environment"}
       other -> {:error, {:unsupported_prompt_context_state, other}}
     end
   end
